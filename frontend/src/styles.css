@@ -153,14 +153,17 @@ input {
   gap: 10px;
 }
 
+.model-card {
+  border: 1px solid #d9dee4;
+  border-radius: 8px;
+  padding: 14px;
+}
+
 .model-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
   align-items: center;
-  border: 1px solid #d9dee4;
-  border-radius: 8px;
-  padding: 14px;
 }
 
 .model-row p {
@@ -174,6 +177,43 @@ input {
   margin-right: 8px;
   color: #58636f;
   font-size: 0.9rem;
+}
+
+.download-progress {
+  margin-top: 14px;
+  border-top: 1px solid #eef1f4;
+  padding-top: 12px;
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: #44505c;
+  font-size: 0.9rem;
+  text-transform: capitalize;
+}
+
+.progress-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8edf2;
+}
+
+.progress-fill {
+  height: 100%;
+  min-width: 3px;
+  border-radius: 999px;
+  background: #31735f;
+  transition: width 180ms ease;
+}
+
+.download-progress p {
+  margin: 8px 0 0;
+  color: #44505c;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 640px) {

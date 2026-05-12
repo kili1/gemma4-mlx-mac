@@ -23,7 +23,7 @@ def test_cli_models_command() -> None:
 
 
 def test_cli_download_command(monkeypatch) -> None:
-    def fake_download(self, request):
+    def fake_download(self, request, progress_callback=None):
         assert request.model == DEFAULT_MODEL_ID
         return ModelDownloadResult(
             model=request.model,

@@ -7,11 +7,25 @@ from pathlib import Path
 import typer
 import uvicorn
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TaskID,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.table import Table
 
 from .adapters import AdapterRegistry
 from .datasets import validate_dataset_dir
-from .downloads import ModelDownloader, ModelDownloadError, ModelDownloadRequest
+from .downloads import (
+    ModelDownloader,
+    ModelDownloadError,
+    ModelDownloadProgress,
+    ModelDownloadRequest,
+)
 from .models import DEFAULT_MODEL_ID, list_model_profiles
 from .system import collect_system_info
 from .tuning import TuneJobStore, TuneRequest
@@ -113,7 +127,7 @@ def download_cmd(
         force_download=force,
     )
     try:
-        result = ModelDownloader().download(request)
+        result = _download_with_progress(request)
     except ModelDownloadError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -121,6 +135,42 @@ def download_cmd(
     console.print(f"Downloaded {result.model}")
     console.print(f"Path: {result.path}")
     console.print(f"Files: {result.files}")
+
+
+def _download_with_progress(request: ModelDownloadRequest):
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        byte_task = progress.add_task("Bytes", total=None)
+        file_task = progress.add_task("Files", total=None, visible=False)
+
+        def on_progress(update: ModelDownloadProgress) -> None:
+            if update.kind == "bytes":
+                _update_progress_task(progress, byte_task, update)
+            else:
+                _update_progress_task(progress, file_task, update, visible=False)
+
+        return ModelDownloader().download(request, progress_callback=on_progress)
+
+
+def _update_progress_task(
+    progress: Progress,
+    task: TaskID,
+    update: ModelDownloadProgress,
+    visible: bool = True,
+) -> None:
+    total = update.total if update.total and update.total > 0 else None
+    progress.update(
+        task,
+        completed=update.completed,
+        total=total,
+        visible=visible,
+    )
 
 
 @app.command("adapters")

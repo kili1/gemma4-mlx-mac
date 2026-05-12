@@ -1,8 +1,10 @@
+from time import sleep
+
 from fastapi.testclient import TestClient
 
 from gemma4_mlx_mac import api
 from gemma4_mlx_mac.app import create_app
-from gemma4_mlx_mac.downloads import ModelDownloader
+from gemma4_mlx_mac.downloads import ModelDownloader, ModelDownloadJobStore
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 
 
@@ -26,13 +28,29 @@ def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -
         assert kwargs["repo_id"] == DEFAULT_MODEL_ID
         return str(model_dir)
 
-    monkeypatch.setattr(api, "model_downloader", ModelDownloader(fake_snapshot_download))
+    monkeypatch.setattr(
+        api,
+        "model_downloads",
+        ModelDownloadJobStore(ModelDownloader(fake_snapshot_download), max_workers=1),
+    )
     client = TestClient(create_app())
 
     response = client.post("/api/models/download", json={"model": DEFAULT_MODEL_ID})
 
     assert response.status_code == 200
-    assert response.json()["path"] == str(model_dir)
+    job_id = response.json()["id"]
+
+    job_response = client.get(f"/api/models/download/{job_id}")
+    assert job_response.status_code == 200
+    assert job_response.json()["status"] in {"queued", "running", "succeeded"}
+
+    for _ in range(20):
+        job_response = client.get(f"/api/models/download/{job_id}")
+        if job_response.json()["status"] == "succeeded":
+            break
+        sleep(0.01)
+
+    assert job_response.json()["path"] == str(model_dir)
 
 
 def test_frontend_shell_is_served() -> None:

@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from .adapters import AdapterRegistry
-from .downloads import ModelDownloader, ModelDownloadError, ModelDownloadRequest
+from .downloads import ModelDownloadJobStore, ModelDownloadRequest
 from .inference import ChatCompletionRequest, ChatService, InferenceNotReady
 from .models import list_model_profiles
 from .system import collect_system_info
@@ -14,7 +14,7 @@ router = APIRouter()
 chat_service = ChatService()
 tune_jobs = TuneJobStore()
 adapters = AdapterRegistry()
-model_downloader = ModelDownloader()
+model_downloads = ModelDownloadJobStore()
 
 
 @router.get("/api/system")
@@ -29,11 +29,20 @@ def get_models() -> dict:
 
 @router.post("/api/models/download")
 def download_model(request: ModelDownloadRequest) -> dict:
-    try:
-        result = model_downloader.download(request)
-    except ModelDownloadError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return result.model_dump()
+    return model_downloads.start(request).model_dump(mode="json")
+
+
+@router.get("/api/models/download/{job_id}")
+def get_model_download(job_id: str) -> dict:
+    job = model_downloads.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Download job not found.")
+    return job.model_dump(mode="json")
+
+
+@router.get("/api/models/downloads")
+def list_model_downloads() -> dict:
+    return {"downloads": [job.model_dump(mode="json") for job in model_downloads.list()]}
 
 
 @router.post("/v1/chat/completions")

@@ -53,6 +53,8 @@ Download the default Gemma 4 MLX model snapshot from Hugging Face:
 gemma4-mlx-mac download
 ```
 
+The CLI shows live byte/file progress. The web UI starts downloads in the background and shows progress in the Models tab.
+
 For gated models, authenticate first:
 
 ```bash
@@ -80,6 +82,8 @@ The backend exposes:
 - `GET /api/system`
 - `GET /api/models`
 - `POST /api/models/download`
+- `GET /api/models/download/{job_id}`
+- `GET /api/models/downloads`
 - `POST /v1/chat/completions`
 - `POST /api/tunes`
 - `GET /api/tunes/{id}`

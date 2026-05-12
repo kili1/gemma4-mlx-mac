@@ -11,6 +11,19 @@ type ModelProfile = {
   default: boolean;
   notes: string;
 };
+type DownloadJob = {
+  id: string;
+  model: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  bytes_downloaded: number;
+  bytes_total: number | null;
+  files_downloaded: number;
+  files_total: number | null;
+  percent: number | null;
+  path: string | null;
+  error: string | null;
+  message: string;
+};
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
@@ -92,6 +105,7 @@ function renderView(view: View) {
 function ModelsPanel() {
   const [models, setModels] = React.useState<ModelProfile[]>([]);
   const [loadingModel, setLoadingModel] = React.useState<string | null>(null);
+  const [downloads, setDownloads] = React.useState<Record<string, DownloadJob>>({});
   const [message, setMessage] = React.useState<string>("Loading model profiles...");
 
   React.useEffect(() => {
@@ -113,7 +127,7 @@ function ModelsPanel() {
 
   async function downloadModel(model: string) {
     setLoadingModel(model);
-    setMessage(`Downloading ${model}...`);
+    setMessage("");
     try {
       const response = await fetch("/api/models/download", {
         method: "POST",
@@ -124,11 +138,33 @@ function ModelsPanel() {
       if (!response.ok) {
         throw new Error(data.detail ?? "Download failed.");
       }
-      setMessage(`Downloaded to ${data.path}`);
+      setDownloads((current) => ({ ...current, [model]: data }));
+      pollDownload(model, data.id);
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Download failed.");
-    } finally {
       setLoadingModel(null);
+    }
+  }
+
+  async function pollDownload(model: string, jobId: string) {
+    try {
+      const response = await fetch(`/api/models/download/${jobId}`);
+      const job: DownloadJob = await response.json();
+      if (!response.ok) {
+        throw new Error(job.error ?? "Could not read download progress.");
+      }
+      setDownloads((current) => ({ ...current, [model]: job }));
+      if (job.status === "queued" || job.status === "running") {
+        window.setTimeout(() => pollDownload(model, jobId), 800);
+        return;
+      }
+      setLoadingModel(null);
+      if (job.status === "failed") {
+        setMessage(job.error ?? "Download failed.");
+      }
+    } catch (error: unknown) {
+      setLoadingModel(null);
+      setMessage(error instanceof Error ? error.message : "Could not read download progress.");
     }
   }
 
@@ -138,27 +174,73 @@ function ModelsPanel() {
       {message && <p className="notice">{message}</p>}
       <div className="model-list">
         {models.map((model) => (
-          <div className="model-row" key={model.id}>
-            <div>
-              <strong>{model.label}</strong>
-              <p>{model.id}</p>
-              <span>{model.recommended_memory_gb} GB recommended</span>
-              {model.default && <span>Default</span>}
+          <div className="model-card" key={model.id}>
+            <div className="model-row">
+              <div>
+                <strong>{model.label}</strong>
+                <p>{model.id}</p>
+                <span>{model.recommended_memory_gb} GB recommended</span>
+                {model.default && <span>Default</span>}
+              </div>
+              <button
+                className="secondary"
+                disabled={loadingModel !== null}
+                onClick={() => downloadModel(model.id)}
+                title={`Download ${model.label}`}
+              >
+                <Download size={18} />
+                <span>{loadingModel === model.id ? "Starting" : "Download"}</span>
+              </button>
             </div>
-            <button
-              className="secondary"
-              disabled={loadingModel !== null}
-              onClick={() => downloadModel(model.id)}
-              title={`Download ${model.label}`}
-            >
-              <Download size={18} />
-              <span>{loadingModel === model.id ? "Downloading" : "Download"}</span>
-            </button>
+            {downloads[model.id] && <DownloadProgress job={downloads[model.id]} />}
           </div>
         ))}
       </div>
     </>
   );
+}
+
+function DownloadProgress({ job }: { job: DownloadJob }) {
+  const percent = job.percent ?? 0;
+  const progressLabel = job.percent === null ? "Preparing" : `${job.percent}%`;
+  const terminalMessage = job.status === "succeeded" && job.path ? `Saved to ${job.path}` : job.error;
+
+  return (
+    <div className="download-progress">
+      <div className="progress-meta">
+        <span>{job.status}</span>
+        <span>{progressLabel}</span>
+      </div>
+      <div className="progress-track" aria-label={`Download progress for ${job.model}`}>
+        <div className="progress-fill" style={{ width: `${percent}%` }} />
+      </div>
+      <p>{terminalMessage || progressDetails(job)}</p>
+    </div>
+  );
+}
+
+function progressDetails(job: DownloadJob) {
+  if (job.bytes_total && job.bytes_total >= job.bytes_downloaded) {
+    return `${formatBytes(job.bytes_downloaded)} / ${formatBytes(job.bytes_total)}`;
+  }
+  if (job.files_total) {
+    return `${job.files_downloaded} / ${job.files_total} files`;
+  }
+  return job.message;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
