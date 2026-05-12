@@ -2,12 +2,20 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import {
   Activity,
+  AlertCircle,
   Bot,
+  CheckCircle2,
+  Circle,
   Cpu,
   Database,
   Download,
   FolderOpen,
+  HardDrive,
+  MessageSquareText,
+  Send,
+  ShieldCheck,
   SlidersHorizontal,
+  Terminal,
   Wrench
 } from "lucide-react";
 import "./styles.css";
@@ -16,7 +24,11 @@ type View = "chat" | "models" | "tune" | "adapters" | "system";
 type ModelProfile = {
   id: string;
   label: string;
+  family: string;
+  size: string;
+  quantization: string;
   recommended_memory_gb: number;
+  modality: string;
   default: boolean;
   downloaded: boolean;
   local_path: string | null;
@@ -56,6 +68,44 @@ type InferenceStatus = {
   job: MlxInstallJob | null;
 };
 type ModelSource = "downloaded" | "path";
+type SystemInfo = {
+  os_name: string;
+  os_version: string;
+  machine: string;
+  python_version: string;
+  total_memory_gb: number;
+  is_macos: boolean;
+  is_apple_silicon: boolean;
+  mlx_ready: boolean;
+  recommendations: string[];
+};
+type TuneJob = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  request: {
+    model: string;
+    data_path: string;
+    adapter_name: string;
+    iters: number;
+    batch_size: number;
+    learning_rate: number;
+    fine_tune_type: "lora" | "dora" | "full";
+  };
+  dataset: {
+    data_path: string;
+    files: Array<{
+      path: string;
+      format: "chat" | "completion" | "text";
+      examples: number;
+    }>;
+  };
+  message: string;
+};
+type AdapterInfo = {
+  id: string;
+  path: string;
+  active: boolean;
+};
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
@@ -69,28 +119,35 @@ function App() {
   const [activeView, setActiveView] = React.useState<View>("chat");
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Apple Silicon local AI</p>
-          <h1>gemma4-mlx-mac</h1>
+    <main className="app-frame">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">G4</div>
+          <div>
+            <p className="eyebrow">Apple Silicon</p>
+            <h1>gemma4-mlx-mac</h1>
+          </div>
         </div>
-        <span className="status">Local only</span>
-      </header>
 
-      <nav className="tabs" aria-label="Primary">
-        {views.map((view) => (
-          <button
-            key={view.id}
-            className={view.id === activeView ? "active" : ""}
-            onClick={() => setActiveView(view.id)}
-            title={view.label}
-          >
-            {view.icon}
-            <span>{view.label}</span>
-          </button>
-        ))}
-      </nav>
+        <nav className="tabs" aria-label="Primary">
+          {views.map((view) => (
+            <button
+              key={view.id}
+              className={view.id === activeView ? "active" : ""}
+              onClick={() => setActiveView(view.id)}
+              title={view.label}
+            >
+              {view.icon}
+              <span>{view.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-status">
+          <ShieldCheck size={18} />
+          <span>Local only</span>
+        </div>
+      </aside>
 
       <section className="workspace">{renderView(activeView)}</section>
     </main>
@@ -104,28 +161,49 @@ function renderView(view: View) {
     case "models":
       return <ModelsPanel />;
     case "tune":
-      return (
-        <>
-          <h2>Fine-tune</h2>
-          <input placeholder="./examples/data" />
-          <button className="primary">Validate Dataset</button>
-        </>
-      );
+      return <TunePanel />;
     case "adapters":
-      return (
-        <>
-          <h2>Adapters</h2>
-          <p>No adapters active.</p>
-        </>
-      );
+      return <AdaptersPanel />;
     case "system":
-      return (
-        <>
-          <h2>System</h2>
-          <p>Run gemma4-mlx-mac doctor for readiness checks.</p>
-        </>
-      );
+      return <SystemPanel />;
   }
+}
+
+function PageHeader({
+  title,
+  eyebrow,
+  children
+}: {
+  title: string;
+  eyebrow: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <header className="page-header">
+      <div>
+        <p className="eyebrow">{eyebrow}</p>
+        <h2>{title}</h2>
+      </div>
+      {children && <div className="page-actions">{children}</div>}
+    </header>
+  );
+}
+
+function StatusBadge({
+  tone = "neutral",
+  children
+}: {
+  tone?: "neutral" | "good" | "warn" | "bad";
+  children: React.ReactNode;
+}) {
+  const Icon =
+    tone === "good" ? CheckCircle2 : tone === "bad" || tone === "warn" ? AlertCircle : Circle;
+  return (
+    <span className={`status-badge ${tone}`}>
+      <Icon size={14} />
+      {children}
+    </span>
+  );
 }
 
 function ChatPanel() {
@@ -134,6 +212,7 @@ function ChatPanel() {
   const [modelSource, setModelSource] = React.useState<ModelSource>("downloaded");
   const [modelPath, setModelPath] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
+  const [lastPrompt, setLastPrompt] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [reply, setReply] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
@@ -282,6 +361,7 @@ function ChatPanel() {
     setIsSending(true);
     setMessage("");
     setReply("");
+    setLastPrompt(content);
     try {
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
@@ -305,97 +385,141 @@ function ChatPanel() {
 
   return (
     <>
-      <div className="chat-header">
-        <h2>Chat</h2>
-        <div className="model-picker">
-          <div className="source-toggle" aria-label="Model source">
-            <button
-              className={modelSource === "downloaded" ? "active" : ""}
-              onClick={() => chooseModelSource("downloaded")}
-              type="button"
-            >
-              Downloaded
-            </button>
-            <button
-              className={modelSource === "path" ? "active" : ""}
-              onClick={() => chooseModelSource("path")}
-              type="button"
-            >
-              Path
-            </button>
+      <PageHeader title="Chat" eyebrow="Local inference">
+        <StatusBadge tone={inferenceReady ? "good" : "warn"}>
+          {inferenceReady ? "MLX ready" : "MLX setup"}
+        </StatusBadge>
+      </PageHeader>
+
+      <div className="chat-layout">
+        <section className="conversation-panel" aria-label="Conversation">
+          {message && <p className="notice">{message}</p>}
+          <div className="chat-thread">
+            {!lastPrompt && !reply && (
+              <div className="empty-state">
+                <MessageSquareText size={28} />
+                <strong>Ready</strong>
+              </div>
+            )}
+            {lastPrompt && (
+              <article className="message user-message">
+                <span>User</span>
+                <p>{lastPrompt}</p>
+              </article>
+            )}
+            {reply && (
+              <article className="message assistant-message">
+                <span>Gemma</span>
+                <pre>{reply}</pre>
+              </article>
+            )}
+            {isSending && (
+              <article className="message assistant-message pending">
+                <span>Gemma</span>
+                <p>Generating</p>
+              </article>
+            )}
           </div>
-          {modelSource === "downloaded" ? (
-            <label className="field">
-              <span>Model</span>
-              <select
-                value={selectedModel}
-                onChange={(event) => chooseDownloadedModel(event.target.value)}
-                disabled={downloadedModels.length === 0 || isSending}
+
+          <div className="composer">
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Ask Gemma 4 something..."
+            />
+            <div className="chat-actions">
+              <span>{activeModelLabel}</span>
+              <button
+                className="primary icon-button"
+                disabled={isSending || !activeModel || !inferenceReady}
+                onClick={sendPrompt}
+                title="Send"
               >
-                {downloadedModels.length === 0 ? (
-                  <option value="">No downloaded models</option>
-                ) : (
-                  downloadedModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))
-                )}
-              </select>
-              {selectedDownloadedModel?.local_path && <small>{selectedDownloadedModel.local_path}</small>}
-            </label>
-          ) : (
-            <label className="field">
-              <span>Model path</span>
-              <input
-                value={modelPath}
-                onChange={(event) => setModelPath(event.target.value)}
-                disabled={isSending}
-                list="downloaded-model-paths"
-                placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
-              />
-              <datalist id="downloaded-model-paths">
-                {downloadedModels
-                  .filter((model) => model.local_path)
-                  .map((model) => (
-                    <option key={model.id} value={model.local_path ?? ""}>
-                      {model.label}
-                    </option>
-                  ))}
-              </datalist>
-            </label>
-          )}
-        </div>
-      </div>
-      {inferenceStatus && !inferenceReady && (
-        <InferenceSetup
-          status={inferenceStatus}
-          job={installJob}
-          isInstalling={Boolean(isInstalling)}
-          onInstall={startInstall}
-        />
-      )}
-      {message && <p className="notice">{message}</p>}
-      <textarea
-        value={prompt}
-        onChange={(event) => setPrompt(event.target.value)}
-        placeholder="Ask Gemma 4 something..."
-      />
-      <div className="chat-actions">
-        <span>{activeModelLabel}</span>
-        <button
-          className="primary"
-          disabled={isSending || !activeModel || !inferenceReady}
-          onClick={sendPrompt}
-        >
-          {isSending ? "Sending" : "Send"}
-        </button>
-      </div>
-      {reply && (
-        <section className="response-panel" aria-label="Assistant response">
-          <pre>{reply}</pre>
+                <Send size={18} />
+                <span>{isSending ? "Sending" : "Send"}</span>
+              </button>
+            </div>
+          </div>
         </section>
-      )}
+
+        <aside className="control-panel" aria-label="Chat controls">
+          <div className="panel-block">
+            <div className="block-heading">
+              <HardDrive size={18} />
+              <strong>Model</strong>
+            </div>
+            <div className="model-picker">
+              <div className="source-toggle" aria-label="Model source">
+                <button
+                  className={modelSource === "downloaded" ? "active" : ""}
+                  onClick={() => chooseModelSource("downloaded")}
+                  type="button"
+                >
+                  Downloaded
+                </button>
+                <button
+                  className={modelSource === "path" ? "active" : ""}
+                  onClick={() => chooseModelSource("path")}
+                  type="button"
+                >
+                  Path
+                </button>
+              </div>
+              {modelSource === "downloaded" ? (
+                <label className="field">
+                  <span>Profile</span>
+                  <select
+                    value={selectedModel}
+                    onChange={(event) => chooseDownloadedModel(event.target.value)}
+                    disabled={downloadedModels.length === 0 || isSending}
+                  >
+                    {downloadedModels.length === 0 ? (
+                      <option value="">No downloaded models</option>
+                    ) : (
+                      downloadedModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                  {selectedDownloadedModel?.local_path && (
+                    <small>{selectedDownloadedModel.local_path}</small>
+                  )}
+                </label>
+              ) : (
+                <label className="field">
+                  <span>Path</span>
+                  <input
+                    value={modelPath}
+                    onChange={(event) => setModelPath(event.target.value)}
+                    disabled={isSending}
+                    list="downloaded-model-paths"
+                    placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
+                  />
+                  <datalist id="downloaded-model-paths">
+                    {downloadedModels
+                      .filter((model) => model.local_path)
+                      .map((model) => (
+                        <option key={model.id} value={model.local_path ?? ""}>
+                          {model.label}
+                        </option>
+                      ))}
+                  </datalist>
+                </label>
+              )}
+            </div>
+          </div>
+          {inferenceStatus && !inferenceReady && (
+            <InferenceSetup
+              status={inferenceStatus}
+              job={installJob}
+              isInstalling={Boolean(isInstalling)}
+              onInstall={startInstall}
+            />
+          )}
+        </aside>
+      </div>
     </>
   );
 }
@@ -520,8 +644,13 @@ function ModelsPanel() {
 
   return (
     <>
-      <h2>Models</h2>
-      <section className="download-settings" aria-label="Model download location">
+      <PageHeader title="Models" eyebrow="Hugging Face snapshots">
+        <StatusBadge tone={models.some((model) => model.downloaded) ? "good" : "neutral"}>
+          {models.filter((model) => model.downloaded).length} downloaded
+        </StatusBadge>
+      </PageHeader>
+
+      <section className="download-settings panel" aria-label="Model download location">
         <label className="field">
           <span>Download folder</span>
           <div className="path-input">
@@ -542,11 +671,19 @@ function ModelsPanel() {
           <div className="model-card" key={model.id}>
             <div className="model-row">
               <div>
-                <strong>{model.label}</strong>
+                <div className="model-title">
+                  <strong>{model.label}</strong>
+                  <div className="badges">
+                    {model.default && <span>Default</span>}
+                    {model.downloaded && <span className="good">Downloaded</span>}
+                  </div>
+                </div>
                 <p>{model.id}</p>
-                <span>{model.recommended_memory_gb} GB recommended</span>
-                {model.default && <span>Default</span>}
-                {model.downloaded && <span>Downloaded</span>}
+                <div className="model-meta">
+                  <span>{model.recommended_memory_gb} GB</span>
+                  <span>{model.quantization}</span>
+                  <span>{model.modality}</span>
+                </div>
               </div>
               <button
                 className="secondary"
@@ -569,6 +706,246 @@ function ModelsPanel() {
         ))}
       </div>
     </>
+  );
+}
+
+function TunePanel() {
+  const [models, setModels] = React.useState<ModelProfile[]>([]);
+  const [model, setModel] = React.useState("");
+  const [dataPath, setDataPath] = React.useState("examples/data");
+  const [adapterName, setAdapterName] = React.useState("demo-adapter");
+  const [iters, setIters] = React.useState(100);
+  const [batchSize, setBatchSize] = React.useState(1);
+  const [message, setMessage] = React.useState("");
+  const [job, setJob] = React.useState<TuneJob | null>(null);
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch("/api/models")
+      .then((response) => response.json())
+      .then((data: { models: ModelProfile[] }) => {
+        setModels(data.models);
+        setModel(data.models.find((profile) => profile.default)?.id ?? data.models[0]?.id ?? "");
+      })
+      .catch(() => setMessage("Could not load model profiles."));
+  }, []);
+
+  async function startTune() {
+    setIsSubmitting(true);
+    setMessage("");
+    setJob(null);
+    try {
+      const response = await fetch("/api/tunes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          data_path: dataPath,
+          adapter_name: adapterName,
+          iters,
+          batch_size: batchSize
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Fine-tune job failed.");
+      }
+      setJob(data);
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Fine-tune job failed.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <>
+      <PageHeader title="Fine-tune" eyebrow="LoRA jobs">
+        <StatusBadge tone={job ? "good" : "neutral"}>{job?.status ?? "idle"}</StatusBadge>
+      </PageHeader>
+      {message && <p className="notice">{message}</p>}
+      <div className="two-column">
+        <section className="panel form-panel">
+          <label className="field">
+            <span>Model</span>
+            <select value={model} onChange={(event) => setModel(event.target.value)}>
+              {models.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Dataset</span>
+            <input value={dataPath} onChange={(event) => setDataPath(event.target.value)} />
+          </label>
+          <label className="field">
+            <span>Adapter</span>
+            <input value={adapterName} onChange={(event) => setAdapterName(event.target.value)} />
+          </label>
+          <div className="form-grid">
+            <label className="field">
+              <span>Iterations</span>
+              <input
+                min={1}
+                type="number"
+                value={iters}
+                onChange={(event) => setIters(Number(event.target.value))}
+              />
+            </label>
+            <label className="field">
+              <span>Batch</span>
+              <input
+                min={1}
+                type="number"
+                value={batchSize}
+                onChange={(event) => setBatchSize(Number(event.target.value))}
+              />
+            </label>
+          </div>
+          <button className="primary" disabled={isSubmitting || !model} onClick={startTune}>
+            {isSubmitting ? "Validating" : "Create Job"}
+          </button>
+        </section>
+
+        <section className="panel result-panel">
+          {job ? (
+            <>
+              <div className="block-heading">
+                <Terminal size={18} />
+                <strong>{job.id}</strong>
+              </div>
+              <dl className="details-list">
+                <div>
+                  <dt>Examples</dt>
+                  <dd>{countDatasetExamples(job.dataset)}</dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{job.status}</dd>
+                </div>
+                <div>
+                  <dt>Adapter</dt>
+                  <dd>{job.request.adapter_name}</dd>
+                </div>
+              </dl>
+              <p>{job.message}</p>
+            </>
+          ) : (
+            <div className="empty-state">
+              <SlidersHorizontal size={28} />
+              <strong>No job queued</strong>
+            </div>
+          )}
+        </section>
+      </div>
+    </>
+  );
+}
+
+function AdaptersPanel() {
+  const [adapters, setAdapters] = React.useState<AdapterInfo[]>([]);
+  const [message, setMessage] = React.useState("");
+
+  React.useEffect(() => {
+    fetch("/api/adapters")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Could not load adapters.");
+        }
+        return response.json();
+      })
+      .then((data: { adapters: AdapterInfo[] }) => setAdapters(data.adapters))
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : "Could not load adapters.");
+      });
+  }, []);
+
+  return (
+    <>
+      <PageHeader title="Adapters" eyebrow="Local LoRA outputs">
+        <StatusBadge tone={adapters.some((adapter) => adapter.active) ? "good" : "neutral"}>
+          {adapters.length} found
+        </StatusBadge>
+      </PageHeader>
+      {message && <p className="notice">{message}</p>}
+      <div className="model-list">
+        {adapters.length === 0 ? (
+          <div className="panel empty-state">
+            <Activity size={28} />
+            <strong>No adapters</strong>
+          </div>
+        ) : (
+          adapters.map((adapter) => (
+            <div className="model-card" key={adapter.id}>
+              <div className="model-row">
+                <div>
+                  <div className="model-title">
+                    <strong>{adapter.id}</strong>
+                    {adapter.active && <div className="badges"><span className="good">Active</span></div>}
+                  </div>
+                  <p>{adapter.path}</p>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+}
+
+function SystemPanel() {
+  const [system, setSystem] = React.useState<SystemInfo | null>(null);
+  const [inference, setInference] = React.useState<InferenceStatus | null>(null);
+  const [message, setMessage] = React.useState("");
+
+  React.useEffect(() => {
+    Promise.all([fetch("/api/system"), fetch("/api/inference/status")])
+      .then(async ([systemResponse, inferenceResponse]) => {
+        if (!systemResponse.ok || !inferenceResponse.ok) {
+          throw new Error("Could not load system status.");
+        }
+        setSystem(await systemResponse.json());
+        setInference(await inferenceResponse.json());
+      })
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : "Could not load system status.");
+      });
+  }, []);
+
+  return (
+    <>
+      <PageHeader title="System" eyebrow="Runtime status">
+        <StatusBadge tone={inference?.available ? "good" : "warn"}>
+          {inference?.available ? "inference ready" : "inference setup"}
+        </StatusBadge>
+      </PageHeader>
+      {message && <p className="notice">{message}</p>}
+      <div className="stats-grid">
+        <MetricCard label="Machine" value={system?.machine ?? "Loading"} />
+        <MetricCard label="Memory" value={system ? `${system.total_memory_gb} GB` : "Loading"} />
+        <MetricCard label="Python" value={system?.python_version ?? "Loading"} />
+        <MetricCard label="MLX" value={inference?.available ? "Installed" : "Missing"} />
+      </div>
+      {system && system.recommendations.length > 0 && (
+        <section className="panel recommendation-list">
+          {system.recommendations.map((recommendation) => (
+            <p key={recommendation}>{recommendation}</p>
+          ))}
+        </section>
+      )}
+    </>
+  );
+}
+
+function MetricCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -599,6 +976,10 @@ function progressDetails(job: DownloadJob) {
     return `${job.files_downloaded} / ${job.files_total} files`;
   }
   return job.message;
+}
+
+function countDatasetExamples(dataset: TuneJob["dataset"]) {
+  return dataset.files.reduce((total, file) => total + file.examples, 0);
 }
 
 function formatBytes(bytes: number) {

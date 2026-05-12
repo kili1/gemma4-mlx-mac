@@ -162,3 +162,12 @@ def test_tune_job_route_validates_dataset() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
+
+
+def test_adapters_route_lists_registry() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/api/adapters")
+
+    assert response.status_code == 200
+    assert "adapters" in response.json()

@@ -130,3 +130,8 @@ def get_tune(job_id: str) -> dict:
 @router.post("/api/adapters/{adapter_id}/activate")
 def activate_adapter(adapter_id: str) -> dict:
     return adapters.activate(adapter_id).model_dump()
+
+
+@router.get("/api/adapters")
+def list_adapters() -> dict:
+    return {"adapters": [adapter.model_dump() for adapter in adapters.list_adapters()]}
