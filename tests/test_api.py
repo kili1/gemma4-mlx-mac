@@ -22,11 +22,13 @@ def test_health_system_and_models_routes() -> None:
 
 def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -> None:
     model_dir = tmp_path / "snapshot"
+    target_dir = tmp_path / "downloads"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{}", encoding="utf-8")
 
     def fake_snapshot_download(**kwargs: object) -> str:
         assert kwargs["repo_id"] == DEFAULT_MODEL_ID
+        assert kwargs["local_dir"] == str(target_dir)
         return str(model_dir)
 
     monkeypatch.setattr(
@@ -36,7 +38,10 @@ def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -
     )
     client = TestClient(create_app())
 
-    response = client.post("/api/models/download", json={"model": DEFAULT_MODEL_ID})
+    response = client.post(
+        "/api/models/download",
+        json={"model": DEFAULT_MODEL_ID, "local_dir": str(target_dir)},
+    )
 
     assert response.status_code == 200
     job_id = response.json()["id"]

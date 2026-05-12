@@ -6,6 +6,7 @@ import {
   Cpu,
   Database,
   Download,
+  FolderOpen,
   SlidersHorizontal,
   Wrench
 } from "lucide-react";
@@ -441,6 +442,7 @@ function ModelsPanel() {
   const [models, setModels] = React.useState<ModelProfile[]>([]);
   const [loadingModel, setLoadingModel] = React.useState<string | null>(null);
   const [downloads, setDownloads] = React.useState<Record<string, DownloadJob>>({});
+  const [downloadFolder, setDownloadFolder] = React.useState("");
   const [message, setMessage] = React.useState<string>("Loading model profiles...");
 
   React.useEffect(() => {
@@ -463,11 +465,15 @@ function ModelsPanel() {
   async function downloadModel(model: string) {
     setLoadingModel(model);
     setMessage("");
+    const targetFolder = downloadFolder.trim();
     try {
       const response = await fetch("/api/models/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model })
+        body: JSON.stringify({
+          model,
+          local_dir: targetFolder || null
+        })
       });
       const data = await response.json();
       if (!response.ok) {
@@ -515,6 +521,21 @@ function ModelsPanel() {
   return (
     <>
       <h2>Models</h2>
+      <section className="download-settings" aria-label="Model download location">
+        <label className="field">
+          <span>Download folder</span>
+          <div className="path-input">
+            <FolderOpen size={18} />
+            <input
+              value={downloadFolder}
+              onChange={(event) => setDownloadFolder(event.target.value)}
+              disabled={loadingModel !== null}
+              placeholder="~/Models/gemma4"
+            />
+          </div>
+          <small>{downloadFolder.trim() || "Default Hugging Face cache"}</small>
+        </label>
+      </section>
       {message && <p className="notice">{message}</p>}
       <div className="model-list">
         {models.map((model) => (

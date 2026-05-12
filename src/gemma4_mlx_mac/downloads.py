@@ -39,6 +39,16 @@ class ModelDownloadRequest(BaseModel):
             raise ValueError("Model id is required.")
         return value.strip()
 
+    @field_validator("cache_dir", "local_dir")
+    @classmethod
+    def path_must_be_normalized(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return str(Path(cleaned).expanduser())
+
 
 class ModelDownloadResult(BaseModel):
     model: str

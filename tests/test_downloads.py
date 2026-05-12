@@ -29,6 +29,12 @@ def test_model_downloader_uses_huggingface_snapshot_download(tmp_path: Path) -> 
     assert result.files == 1
 
 
+def test_model_download_request_normalizes_local_dir() -> None:
+    request = ModelDownloadRequest(model=DEFAULT_MODEL_ID, local_dir="~/Models/gemma4")
+
+    assert request.local_dir == str(Path("~/Models/gemma4").expanduser())
+
+
 def test_model_downloader_reports_progress(tmp_path: Path) -> None:
     model_dir = tmp_path / "model"
     model_dir.mkdir()

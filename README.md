@@ -57,7 +57,7 @@ Download the default Gemma 4 MLX model snapshot from Hugging Face:
 gemma4-mlx-mac download
 ```
 
-The CLI shows live byte/file progress. The web UI starts downloads in the background and shows progress in the Models tab.
+The CLI shows live byte/file progress. The web UI starts downloads in the background, shows progress in the Models tab, and lets you set a local download folder before starting a model download.
 
 For gated models, authenticate first:
 

@@ -298,6 +298,40 @@ select {
   gap: 10px;
 }
 
+.download-settings {
+  border: 1px solid #d9dee4;
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+.path-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid #cfd6df;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 0 12px;
+}
+
+.path-input svg {
+  color: #58636f;
+}
+
+.path-input input {
+  border: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.path-input:focus-within {
+  border-color: #17202a;
+  box-shadow: 0 0 0 2px rgba(23, 32, 42, 0.12);
+}
+
 .model-card {
   border: 1px solid #d9dee4;
   border-radius: 8px;
