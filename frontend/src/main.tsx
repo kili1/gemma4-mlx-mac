@@ -54,6 +54,7 @@ type InferenceStatus = {
   error: string | null;
   job: MlxInstallJob | null;
 };
+type ModelSource = "downloaded" | "path";
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
@@ -129,6 +130,8 @@ function renderView(view: View) {
 function ChatPanel() {
   const [models, setModels] = React.useState<ModelProfile[]>([]);
   const [selectedModel, setSelectedModel] = React.useState("");
+  const [modelSource, setModelSource] = React.useState<ModelSource>("downloaded");
+  const [modelPath, setModelPath] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [reply, setReply] = React.useState("");
@@ -136,9 +139,17 @@ function ChatPanel() {
   const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus | null>(null);
   const [installJob, setInstallJob] = React.useState<MlxInstallJob | null>(null);
   const downloadedModels = models.filter((model) => model.downloaded);
+  const selectedDownloadedModel =
+    downloadedModels.find((model) => model.id === selectedModel) ?? null;
+  const activeModel =
+    modelSource === "path" ? modelPath.trim() : selectedDownloadedModel?.id ?? "";
+  const activeModelLabel =
+    modelSource === "path" ? modelPath.trim() || "No model path selected" : activeModel;
   const inferenceReady = inferenceStatus?.available === true;
   const isInstalling =
-    installJob?.status === "queued" || installJob?.status === "running" || inferenceStatus?.installing;
+    installJob?.status === "queued" ||
+    installJob?.status === "running" ||
+    inferenceStatus?.installing;
 
   React.useEffect(() => {
     loadModels();
@@ -157,6 +168,9 @@ function ChatPanel() {
       const defaultModel = availableModels.find((model) => model.default) ?? availableModels[0];
       if (defaultModel) {
         setSelectedModel(defaultModel.id);
+        if (defaultModel.local_path) {
+          setModelPath(defaultModel.local_path);
+        }
       } else {
         setSelectedModel("");
         setMessage("Download a model in the Models tab before chatting.");
@@ -229,13 +243,33 @@ function ChatPanel() {
     }
   }
 
+  function chooseModelSource(source: ModelSource) {
+    setModelSource(source);
+    if (source === "path" && !modelPath && selectedDownloadedModel?.local_path) {
+      setModelPath(selectedDownloadedModel.local_path);
+    }
+    setMessage("");
+  }
+
+  function chooseDownloadedModel(modelId: string) {
+    setSelectedModel(modelId);
+    const model = downloadedModels.find((profile) => profile.id === modelId);
+    if (model?.local_path && modelSource === "path") {
+      setModelPath(model.local_path);
+    }
+  }
+
   async function sendPrompt() {
     const content = prompt.trim();
     if (!inferenceReady) {
       setMessage("Install MLX inference before chatting.");
       return;
     }
-    if (!selectedModel) {
+    if (!activeModel) {
+      if (modelSource === "path") {
+        setMessage("Enter a local model path first.");
+        return;
+      }
       setMessage("Download a model in the Models tab before chatting.");
       return;
     }
@@ -252,7 +286,7 @@ function ChatPanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: selectedModel,
+          model: activeModel,
           messages: [{ role: "user", content }]
         })
       });
@@ -272,24 +306,65 @@ function ChatPanel() {
     <>
       <div className="chat-header">
         <h2>Chat</h2>
-        <label className="field">
-          <span>Model</span>
-          <select
-            value={selectedModel}
-            onChange={(event) => setSelectedModel(event.target.value)}
-            disabled={downloadedModels.length === 0 || isSending}
-          >
-            {downloadedModels.length === 0 ? (
-              <option value="">No downloaded models</option>
-            ) : (
-              downloadedModels.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.label}
-                </option>
-              ))
-            )}
-          </select>
-        </label>
+        <div className="model-picker">
+          <div className="source-toggle" aria-label="Model source">
+            <button
+              className={modelSource === "downloaded" ? "active" : ""}
+              onClick={() => chooseModelSource("downloaded")}
+              type="button"
+            >
+              Downloaded
+            </button>
+            <button
+              className={modelSource === "path" ? "active" : ""}
+              onClick={() => chooseModelSource("path")}
+              type="button"
+            >
+              Path
+            </button>
+          </div>
+          {modelSource === "downloaded" ? (
+            <label className="field">
+              <span>Model</span>
+              <select
+                value={selectedModel}
+                onChange={(event) => chooseDownloadedModel(event.target.value)}
+                disabled={downloadedModels.length === 0 || isSending}
+              >
+                {downloadedModels.length === 0 ? (
+                  <option value="">No downloaded models</option>
+                ) : (
+                  downloadedModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))
+                )}
+              </select>
+              {selectedDownloadedModel?.local_path && <small>{selectedDownloadedModel.local_path}</small>}
+            </label>
+          ) : (
+            <label className="field">
+              <span>Model path</span>
+              <input
+                value={modelPath}
+                onChange={(event) => setModelPath(event.target.value)}
+                disabled={isSending}
+                list="downloaded-model-paths"
+                placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
+              />
+              <datalist id="downloaded-model-paths">
+                {downloadedModels
+                  .filter((model) => model.local_path)
+                  .map((model) => (
+                    <option key={model.id} value={model.local_path ?? ""}>
+                      {model.label}
+                    </option>
+                  ))}
+              </datalist>
+            </label>
+          )}
+        </div>
       </div>
       {inferenceStatus && !inferenceReady && (
         <InferenceSetup
@@ -306,10 +381,10 @@ function ChatPanel() {
         placeholder="Ask Gemma 4 something..."
       />
       <div className="chat-actions">
-        <span>{selectedModel || "No downloaded model selected"}</span>
+        <span>{activeModelLabel}</span>
         <button
           className="primary"
-          disabled={isSending || !selectedModel || !inferenceReady}
+          disabled={isSending || !activeModel || !inferenceReady}
           onClick={sendPrompt}
         >
           {isSending ? "Sending" : "Send"}

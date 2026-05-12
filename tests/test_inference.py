@@ -3,7 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from gemma4_mlx_mac import inference
-from gemma4_mlx_mac.inference import ChatCompletionRequest, ChatMessage, ChatService
+from gemma4_mlx_mac.inference import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ChatService,
+    InferenceNotReady,
+)
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 
 
@@ -79,3 +84,46 @@ def test_default_loader_falls_back_for_unused_gemma4_weights(monkeypatch) -> Non
     )
 
     assert inference._default_model_loader("/tmp/gemma") == ("model", "tokenizer")
+
+
+def test_chat_service_accepts_existing_local_model_path(tmp_path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    def fake_loader(model_path: str):
+        assert model_path == str(model_dir)
+        return object(), FakeTokenizer()
+
+    service = ChatService(
+        model_loader=fake_loader,
+        stream_generator=lambda *_args, **_kwargs: [SimpleNamespace(text="ok")],
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: None,
+    )
+
+    response = service.create_completion(
+        ChatCompletionRequest(
+            model=str(model_dir),
+            messages=[ChatMessage(role="user", content="hello")],
+            max_tokens=1,
+        )
+    )
+
+    assert response["model"] == str(model_dir)
+    assert response["choices"][0]["message"]["content"] == "ok"
+
+
+def test_chat_service_reports_missing_local_model_path() -> None:
+    service = ChatService(model_path_resolver=lambda _model_id: None)
+
+    try:
+        service.create_completion(
+            ChatCompletionRequest(
+                model="/missing/model/path",
+                messages=[ChatMessage(role="user", content="hello")],
+            )
+        )
+    except InferenceNotReady as exc:
+        assert "Model path does not exist" in str(exc)
+    else:
+        raise AssertionError("Expected missing local model path to fail before MLX loading.")

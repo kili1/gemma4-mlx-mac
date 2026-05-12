@@ -8,7 +8,7 @@ from threading import RLock
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .downloads import get_cached_model_path
 from .models import DEFAULT_MODEL_ID
@@ -25,6 +25,14 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = Field(default=512, ge=1)
     temperature: float = Field(default=0.7, ge=0)
     stream: bool = False
+
+    @field_validator("model")
+    @classmethod
+    def model_must_not_be_empty(cls, value: str) -> str:
+        model = value.strip()
+        if not model:
+            raise ValueError("Model id or local path is required.")
+        return model
 
 
 class InferenceNotReady(RuntimeError):
@@ -129,8 +137,12 @@ class ChatService:
             return loaded
 
     def _resolve_model_path(self, model_id: str) -> str:
-        if Path(model_id).exists():
-            return model_id
+        local_model_path = _existing_model_path(model_id)
+        if local_model_path is not None:
+            return str(local_model_path)
+        if _looks_like_path(model_id):
+            raise InferenceNotReady(f"Model path does not exist: {model_id}")
+
         local_path = self._model_path_resolver(model_id)
         if local_path is None:
             raise InferenceNotReady(
@@ -229,3 +241,18 @@ def _fallback_prompt(messages: list[ChatMessage]) -> str:
     parts = [f"{message.role}: {message.content}" for message in messages]
     parts.append("assistant:")
     return "\n".join(parts)
+
+
+def _existing_model_path(value: str) -> Path | None:
+    candidate = Path(value).expanduser()
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def _looks_like_path(value: str) -> bool:
+    return (
+        value.startswith(("/", "~", "."))
+        or value.count("/") > 1
+        or "\\" in value
+    )

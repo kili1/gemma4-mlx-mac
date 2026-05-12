@@ -137,6 +137,36 @@ select {
   margin-bottom: 16px;
 }
 
+.model-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.source-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid #cfd6df;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.source-toggle button {
+  min-height: 36px;
+  border: 0;
+  background: #ffffff;
+  color: #17202a;
+  cursor: pointer;
+}
+
+.source-toggle button + button {
+  border-left: 1px solid #cfd6df;
+}
+
+.source-toggle button.active {
+  background: #17202a;
+  color: #ffffff;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -145,6 +175,16 @@ select {
 .field span {
   color: #58636f;
   font-size: 0.9rem;
+}
+
+.field input {
+  margin-bottom: 0;
+}
+
+.field small {
+  color: #58636f;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
 }
 
 .chat-actions {

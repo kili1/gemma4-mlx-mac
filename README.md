@@ -41,7 +41,7 @@ Start the local app:
 gemma4-mlx-mac serve --open
 ```
 
-The Chat tab only lets you select models that are already downloaded locally. Use the Models tab or the CLI download command to make more models available for chat.
+The Chat tab only lets you select downloaded model profiles by default. You can also switch to Path and point chat at an existing local MLX model snapshot directory.
 
 If the MLX optional dependencies are not installed, the Chat tab shows an Install MLX action that installs the `mlx` extra into the current Python environment and streams the local install log.
 
