@@ -4,9 +4,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from .adapters import AdapterRegistry
-from .downloads import ModelDownloadJobStore, ModelDownloadRequest
+from .downloads import ModelDownloadJobStore, ModelDownloadRequest, get_cached_model_path
 from .inference import ChatCompletionRequest, ChatService, InferenceNotReady
-from .models import list_model_profiles
+from .models import ModelProfile, list_model_profiles
 from .system import collect_system_info
 from .tuning import TuneJobStore, TuneRequest
 
@@ -24,7 +24,26 @@ def get_system() -> dict:
 
 @router.get("/api/models")
 def get_models() -> dict:
-    return {"models": [profile.model_dump() for profile in list_model_profiles()]}
+    downloaded_paths = model_downloads.downloaded_paths()
+    return {
+        "models": [
+            _with_download_state(profile, downloaded_paths).model_dump()
+            for profile in list_model_profiles()
+        ]
+    }
+
+
+def _with_download_state(
+    profile: ModelProfile,
+    downloaded_paths: dict[str, str],
+) -> ModelProfile:
+    local_path = downloaded_paths.get(profile.id) or get_cached_model_path(profile.id)
+    return profile.model_copy(
+        update={
+            "downloaded": local_path is not None,
+            "local_path": local_path,
+        }
+    )
 
 
 @router.post("/api/models/download")

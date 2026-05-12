@@ -16,6 +16,8 @@ class ModelProfile(BaseModel):
     recommended_memory_gb: int
     modality: Literal["text", "image-text", "any-to-any"]
     default: bool = False
+    downloaded: bool = False
+    local_path: str | None = None
     notes: str = Field(default="")
 
 

@@ -52,6 +52,11 @@ def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -
 
     assert job_response.json()["path"] == str(model_dir)
 
+    models_response = client.get("/api/models")
+    default_model = models_response.json()["models"][0]
+    assert default_model["downloaded"] is True
+    assert default_model["local_path"] == str(model_dir)
+
 
 def test_frontend_shell_is_served() -> None:
     client = TestClient(create_app())

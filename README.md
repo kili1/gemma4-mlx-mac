@@ -41,6 +41,8 @@ Start the local app:
 gemma4-mlx-mac serve --open
 ```
 
+The Chat tab only lets you select models that are already downloaded locally. Use the Models tab or the CLI download command to make more models available for chat.
+
 List the built-in model profiles:
 
 ```bash

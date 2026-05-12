@@ -9,6 +9,8 @@ type ModelProfile = {
   label: string;
   recommended_memory_gb: number;
   default: boolean;
+  downloaded: boolean;
+  local_path: string | null;
   notes: string;
 };
 type DownloadJob = {
@@ -24,8 +26,6 @@ type DownloadJob = {
   error: string | null;
   message: string;
 };
-
-const defaultModelId = "mlx-community/gemma-4-e2b-it-4bit";
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
@@ -100,11 +100,12 @@ function renderView(view: View) {
 
 function ChatPanel() {
   const [models, setModels] = React.useState<ModelProfile[]>([]);
-  const [selectedModel, setSelectedModel] = React.useState(defaultModelId);
+  const [selectedModel, setSelectedModel] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [reply, setReply] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
+  const downloadedModels = models.filter((model) => model.downloaded);
 
   React.useEffect(() => {
     fetch("/api/models")
@@ -116,9 +117,14 @@ function ChatPanel() {
       })
       .then((data: { models: ModelProfile[] }) => {
         setModels(data.models);
-        const defaultModel = data.models.find((model) => model.default) ?? data.models[0];
+        const availableModels = data.models.filter((model) => model.downloaded);
+        const defaultModel =
+          availableModels.find((model) => model.default) ?? availableModels[0];
         if (defaultModel) {
           setSelectedModel(defaultModel.id);
+        } else {
+          setSelectedModel("");
+          setMessage("Download a model in the Models tab before chatting.");
         }
       })
       .catch((error: unknown) => {
@@ -128,6 +134,10 @@ function ChatPanel() {
 
   async function sendPrompt() {
     const content = prompt.trim();
+    if (!selectedModel) {
+      setMessage("Download a model in the Models tab before chatting.");
+      return;
+    }
     if (!content) {
       setMessage("Enter a prompt first.");
       return;
@@ -166,12 +176,12 @@ function ChatPanel() {
           <select
             value={selectedModel}
             onChange={(event) => setSelectedModel(event.target.value)}
-            disabled={models.length === 0 || isSending}
+            disabled={downloadedModels.length === 0 || isSending}
           >
-            {models.length === 0 ? (
-              <option value={selectedModel}>{selectedModel}</option>
+            {downloadedModels.length === 0 ? (
+              <option value="">No downloaded models</option>
             ) : (
-              models.map((model) => (
+              downloadedModels.map((model) => (
                 <option key={model.id} value={model.id}>
                   {model.label}
                 </option>
@@ -187,8 +197,8 @@ function ChatPanel() {
         placeholder="Ask Gemma 4 something..."
       />
       <div className="chat-actions">
-        <span>{selectedModel}</span>
-        <button className="primary" disabled={isSending} onClick={sendPrompt}>
+        <span>{selectedModel || "No downloaded model selected"}</span>
+        <button className="primary" disabled={isSending || !selectedModel} onClick={sendPrompt}>
           {isSending ? "Sending" : "Send"}
         </button>
       </div>
@@ -261,6 +271,15 @@ function ModelsPanel() {
       if (job.status === "failed") {
         setMessage(job.error ?? "Download failed.");
       }
+      if (job.status === "succeeded") {
+        setModels((current) =>
+          current.map((profile) =>
+            profile.id === model
+              ? { ...profile, downloaded: true, local_path: job.path }
+              : profile
+          )
+        );
+      }
     } catch (error: unknown) {
       setLoadingModel(null);
       setMessage(error instanceof Error ? error.message : "Could not read download progress.");
@@ -280,6 +299,7 @@ function ModelsPanel() {
                 <p>{model.id}</p>
                 <span>{model.recommended_memory_gb} GB recommended</span>
                 {model.default && <span>Default</span>}
+                {model.downloaded && <span>Downloaded</span>}
               </div>
               <button
                 className="secondary"
@@ -288,7 +308,13 @@ function ModelsPanel() {
                 title={`Download ${model.label}`}
               >
                 <Download size={18} />
-                <span>{loadingModel === model.id ? "Starting" : "Download"}</span>
+                <span>
+                  {loadingModel === model.id
+                    ? "Starting"
+                    : model.downloaded
+                      ? "Download again"
+                      : "Download"}
+                </span>
               </button>
             </div>
             {downloads[model.id] && <DownloadProgress job={downloads[model.id]} />}

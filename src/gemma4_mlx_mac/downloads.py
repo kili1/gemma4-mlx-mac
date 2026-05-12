@@ -158,6 +158,14 @@ class ModelDownloadJobStore:
         with self._lock:
             return list(self._jobs.values())
 
+    def downloaded_paths(self) -> dict[str, str]:
+        with self._lock:
+            return {
+                job.model: job.path
+                for job in self._jobs.values()
+                if job.status == "succeeded" and job.path
+            }
+
     def _run(self, job_id: str, request: ModelDownloadRequest) -> None:
         self._update(
             job_id,
@@ -229,6 +237,30 @@ def _load_snapshot_download() -> SnapshotDownloader:
             "huggingface-hub is not installed. Reinstall gemma4-mlx-mac to enable downloads."
         ) from exc
     return snapshot_download
+
+
+def get_cached_model_path(model_id: str, cache_dir: str | Path | None = None) -> str | None:
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return None
+
+    try:
+        cached_config = try_to_load_from_cache(
+            repo_id=model_id,
+            filename="config.json",
+            cache_dir=cache_dir,
+            repo_type="model",
+        )
+    except Exception:
+        return None
+
+    if not isinstance(cached_config, str):
+        return None
+    config_path = Path(cached_config)
+    if not config_path.exists():
+        return None
+    return str(config_path.parent)
 
 
 def _progress_tqdm_class(progress_callback: ProgressCallback) -> type[tqdm]:
