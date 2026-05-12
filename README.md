@@ -155,6 +155,8 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 Streaming responses are Server-Sent Events. Each chunk includes an OpenAI-style `delta.content` plus `metrics.completion_tokens`, `metrics.elapsed_seconds`, and `metrics.tokens_per_second`.
 
+Set `show_thinking: true` in chat requests, or enable Thinking in the Chat tab, to ask the model for a brief visible reasoning summary before the answer. Raw `<think>...</think>` blocks are filtered from responses.
+
 ## Fine-Tuning
 
 V1 focuses on text LoRA/QLoRA. The current UI and API validate datasets and create starter jobs; MLX training execution will run behind the same job interface.

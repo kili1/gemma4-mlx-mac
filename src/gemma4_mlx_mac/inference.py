@@ -25,6 +25,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = Field(default=512, ge=1)
     temperature: float = Field(default=0.7, ge=0)
     stream: bool = False
+    show_thinking: bool = False
 
     @field_validator("model")
     @classmethod
@@ -122,14 +123,15 @@ class ChatService:
 
     def stream_tokens(self, request: ChatCompletionRequest) -> Iterable[GeneratedToken]:
         loaded = self._load_model(request.model)
-        prompt = _render_prompt(loaded.tokenizer, request.messages)
+        prompt = _render_prompt(loaded.tokenizer, _messages_for_request(request))
+        thinking_filter = _ThinkingTagFilter()
         started_at = time.monotonic()
         completion_tokens = 0
         prompt_tokens = 0
 
         try:
             for raw_chunk in self._stream_completion(loaded, prompt, request):
-                text = str(getattr(raw_chunk, "text", raw_chunk))
+                text = thinking_filter.feed(str(getattr(raw_chunk, "text", raw_chunk)))
                 prompt_tokens = int(getattr(raw_chunk, "prompt_tokens", prompt_tokens) or 0)
                 reported_tokens = int(getattr(raw_chunk, "generation_tokens", 0) or 0)
                 if reported_tokens > completion_tokens:
@@ -144,6 +146,16 @@ class ChatService:
                     elapsed_seconds=elapsed_seconds,
                     tokens_per_second=completion_tokens / elapsed_seconds,
                     finish_reason=getattr(raw_chunk, "finish_reason", None),
+                )
+            remaining_text = thinking_filter.flush()
+            if remaining_text:
+                elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
+                yield GeneratedToken(
+                    text=remaining_text,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    elapsed_seconds=elapsed_seconds,
+                    tokens_per_second=completion_tokens / elapsed_seconds,
                 )
         except InferenceNotReady:
             raise
@@ -270,10 +282,86 @@ def _render_prompt(tokenizer: Any, messages: list[ChatMessage]) -> str | list[in
     return _fallback_prompt(messages)
 
 
+def _messages_for_request(request: ChatCompletionRequest) -> list[ChatMessage]:
+    if request.show_thinking:
+        instruction = (
+            "When useful, include a brief visible reasoning summary before the answer. "
+            "Use the labels `Thinking:` and `Answer:`. Keep `Thinking:` to 1-3 concise "
+            "bullets with key considerations only; do not reveal hidden chain-of-thought."
+        )
+    else:
+        instruction = (
+            "Answer directly. Do not reveal hidden chain-of-thought or step-by-step "
+            "private reasoning."
+        )
+    return [ChatMessage(role="system", content=instruction), *request.messages]
+
+
 def _fallback_prompt(messages: list[ChatMessage]) -> str:
     parts = [f"{message.role}: {message.content}" for message in messages]
     parts.append("assistant:")
     return "\n".join(parts)
+
+
+class _ThinkingTagFilter:
+    _opening = "<think>"
+    _closing = "</think>"
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside_thinking = False
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+
+        combined = self._buffer + text
+        self._buffer = ""
+        output: list[str] = []
+        cursor = 0
+
+        while cursor < len(combined):
+            lower = combined.lower()
+            if self._inside_thinking:
+                end = lower.find(self._closing, cursor)
+                if end == -1:
+                    tail_start = max(cursor, len(combined) - (len(self._closing) - 1))
+                    self._buffer = combined[tail_start:]
+                    return "".join(output)
+                cursor = end + len(self._closing)
+                self._inside_thinking = False
+                continue
+
+            start = lower.find(self._opening, cursor)
+            if start == -1:
+                safe_end = _safe_marker_boundary(combined, cursor, self._opening)
+                output.append(combined[cursor:safe_end])
+                self._buffer = combined[safe_end:]
+                return "".join(output)
+
+            output.append(combined[cursor:start])
+            cursor = start + len(self._opening)
+            self._inside_thinking = True
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        if self._inside_thinking:
+            self._buffer = ""
+            return ""
+        remaining = self._buffer
+        self._buffer = ""
+        return remaining
+
+
+def _safe_marker_boundary(text: str, start: int, marker: str) -> int:
+    lower = text.lower()
+    max_tail = min(len(marker) - 1, len(text) - start)
+    for tail_length in range(max_tail, 0, -1):
+        tail_start = len(text) - tail_length
+        if marker.startswith(lower[tail_start:]):
+            return tail_start
+    return len(text)
 
 
 def _existing_model_path(value: str) -> Path | None:

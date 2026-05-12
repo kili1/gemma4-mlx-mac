@@ -119,6 +119,7 @@ def test_chat_route_shape_returns_completion(monkeypatch) -> None:
     class FakeChatService:
         def create_completion(self, request) -> dict:
             assert request.model == DEFAULT_MODEL_ID
+            assert request.show_thinking is True
             return {
                 "id": "chatcmpl-test",
                 "object": "chat.completion",
@@ -141,6 +142,7 @@ def test_chat_route_shape_returns_completion(monkeypatch) -> None:
         json={
             "model": DEFAULT_MODEL_ID,
             "messages": [{"role": "user", "content": "hello"}],
+            "show_thinking": True,
         },
     )
 

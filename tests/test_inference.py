@@ -13,22 +13,27 @@ from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 
 
 class FakeTokenizer:
+    def __init__(self) -> None:
+        self.messages = []
+
     def apply_chat_template(
         self,
         messages,
         tokenize: bool = False,
         add_generation_prompt: bool = True,
     ) -> str:
-        assert messages == [{"role": "user", "content": "hello"}]
+        self.messages = messages
         assert tokenize is False
         assert add_generation_prompt is True
         return "rendered prompt"
 
 
 def test_chat_service_uses_mlx_stream_generate_shape() -> None:
+    tokenizer = FakeTokenizer()
+
     def fake_loader(model_path: str):
         assert model_path == "/tmp/gemma"
-        return object(), FakeTokenizer()
+        return object(), tokenizer
 
     def fake_stream_generate(model, tokenizer, prompt, **kwargs):
         assert isinstance(model, object)
@@ -69,6 +74,56 @@ def test_chat_service_uses_mlx_stream_generate_shape() -> None:
     assert response["choices"][0]["message"]["content"] == "hello back"
     assert response["usage"]["prompt_tokens"] == 4
     assert response["usage"]["completion_tokens"] == 2
+    assert tokenizer.messages[0]["role"] == "system"
+    assert "Answer directly" in tokenizer.messages[0]["content"]
+    assert tokenizer.messages[1] == {"role": "user", "content": "hello"}
+
+
+def test_chat_service_can_request_visible_thinking_summary() -> None:
+    tokenizer = FakeTokenizer()
+    service = ChatService(
+        model_loader=lambda _model_path: (object(), tokenizer),
+        stream_generator=lambda *_args, **_kwargs: [SimpleNamespace(text="ok")],
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: "/tmp/gemma",
+    )
+
+    service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[ChatMessage(role="user", content="hello")],
+            show_thinking=True,
+        )
+    )
+
+    assert "Thinking:" in tokenizer.messages[0]["content"]
+    assert "Answer:" in tokenizer.messages[0]["content"]
+
+
+def test_chat_service_strips_private_thinking_tags() -> None:
+    def fake_stream_generate(*_args, **_kwargs):
+        yield SimpleNamespace(text="<thi", prompt_tokens=2, generation_tokens=1)
+        yield SimpleNamespace(text="nk>private reasoning", prompt_tokens=2, generation_tokens=2)
+        yield SimpleNamespace(text="</think>visible answer", prompt_tokens=2, generation_tokens=3)
+
+    service = ChatService(
+        model_loader=lambda _model_path: (object(), FakeTokenizer()),
+        stream_generator=fake_stream_generate,
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: "/tmp/gemma",
+    )
+
+    chunks = list(
+        service.stream_tokens(
+            ChatCompletionRequest(
+                model=DEFAULT_MODEL_ID,
+                messages=[ChatMessage(role="user", content="hello")],
+                show_thinking=True,
+            )
+        )
+    )
+
+    assert "".join(chunk.text for chunk in chunks) == "visible answer"
 
 
 def test_chat_service_streams_token_metrics() -> None:

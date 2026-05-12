@@ -245,6 +245,7 @@ function ChatPanel() {
   const [message, setMessage] = React.useState("");
   const [reply, setReply] = React.useState("");
   const [generationStats, setGenerationStats] = React.useState<GenerationStats | null>(null);
+  const [showThinking, setShowThinking] = React.useState(false);
   const [isSending, setIsSending] = React.useState(false);
   const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus | null>(null);
   const [installJob, setInstallJob] = React.useState<MlxInstallJob | null>(null);
@@ -400,6 +401,7 @@ function ChatPanel() {
         body: JSON.stringify({
           model: activeModel,
           messages: [{ role: "user", content }],
+          show_thinking: showThinking,
           stream: true
         })
       });
@@ -570,6 +572,26 @@ function ChatPanel() {
                 </label>
               )}
             </div>
+          </div>
+          <div className="panel-block">
+            <div className="block-heading">
+              <Activity size={18} />
+              <strong>Thinking</strong>
+            </div>
+            <label className="switch-row">
+              <span className="switch-copy">
+                <strong>Show summary</strong>
+                <small>Ask for a brief visible reasoning summary before the answer.</small>
+              </span>
+              <input
+                aria-label="Show thinking summary"
+                checked={showThinking}
+                className="switch-control"
+                disabled={isSending}
+                onChange={(event) => setShowThinking(event.target.checked)}
+                type="checkbox"
+              />
+            </label>
           </div>
           {inferenceStatus && !inferenceReady && (
             <InferenceSetup
