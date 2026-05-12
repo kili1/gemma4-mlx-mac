@@ -306,6 +306,11 @@ h2 {
   padding: 14px;
 }
 
+.control-stack {
+  display: grid;
+  gap: 14px;
+}
+
 .panel,
 .model-card,
 .metric-card {
@@ -557,6 +562,48 @@ select {
   border-radius: 6px;
   padding: 10px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memory-card {
+  display: grid;
+  gap: 10px;
+}
+
+.memory-card p,
+.memory-card small {
+  margin: 0;
+  color: #65736e;
+  line-height: 1.4;
+}
+
+.memory-card small {
+  overflow-wrap: anywhere;
+}
+
+.memory-value {
+  font-size: 1.65rem;
+  letter-spacing: 0;
+}
+
+.memory-details {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.memory-details div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.memory-details dt {
+  color: #65736e;
+}
+
+.memory-details dd {
+  margin: 0;
   overflow-wrap: anywhere;
 }
 

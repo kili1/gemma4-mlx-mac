@@ -58,6 +58,18 @@ type MlxInstallJob = {
   error: string | null;
   message: string;
 };
+type ModelMemoryStatus = {
+  loaded: boolean;
+  loaded_count: number;
+  loaded_models: Array<{
+    id: string;
+    path: string;
+  }>;
+  process_memory_bytes: number | null;
+  baseline_memory_bytes: number | null;
+  model_memory_bytes: number | null;
+  note: string;
+};
 type InferenceStatus = {
   available: boolean;
   installing: boolean;
@@ -67,6 +79,7 @@ type InferenceStatus = {
   message: string;
   error: string | null;
   job: MlxInstallJob | null;
+  model_memory: ModelMemoryStatus;
 };
 type ModelSource = "downloaded" | "path";
 type SystemInfo = {
@@ -441,6 +454,7 @@ function ChatPanel() {
       setMessage(error instanceof Error ? error.message : "Chat request failed.");
     } finally {
       setIsSending(false);
+      loadInferenceStatus();
     }
   }
 
@@ -505,105 +519,145 @@ function ChatPanel() {
           </div>
         </section>
 
-        <aside className="control-panel" aria-label="Chat controls">
-          <div className="panel-block">
-            <div className="block-heading">
-              <HardDrive size={18} />
-              <strong>Model</strong>
-            </div>
-            <div className="model-picker">
-              <div className="source-toggle" aria-label="Model source">
-                <button
-                  className={modelSource === "downloaded" ? "active" : ""}
-                  onClick={() => chooseModelSource("downloaded")}
-                  type="button"
-                >
-                  Downloaded
-                </button>
-                <button
-                  className={modelSource === "path" ? "active" : ""}
-                  onClick={() => chooseModelSource("path")}
-                  type="button"
-                >
-                  Path
-                </button>
+        <aside className="control-stack" aria-label="Chat controls">
+          <section className="control-panel" aria-label="Model and response controls">
+            <div className="panel-block">
+              <div className="block-heading">
+                <HardDrive size={18} />
+                <strong>Model</strong>
               </div>
-              {modelSource === "downloaded" ? (
-                <label className="field">
-                  <span>Profile</span>
-                  <select
-                    value={selectedModel}
-                    onChange={(event) => chooseDownloadedModel(event.target.value)}
-                    disabled={downloadedModels.length === 0 || isSending}
+              <div className="model-picker">
+                <div className="source-toggle" aria-label="Model source">
+                  <button
+                    className={modelSource === "downloaded" ? "active" : ""}
+                    onClick={() => chooseModelSource("downloaded")}
+                    type="button"
                   >
-                    {downloadedModels.length === 0 ? (
-                      <option value="">No downloaded models</option>
-                    ) : (
-                      downloadedModels.map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.label}
-                        </option>
-                      ))
+                    Downloaded
+                  </button>
+                  <button
+                    className={modelSource === "path" ? "active" : ""}
+                    onClick={() => chooseModelSource("path")}
+                    type="button"
+                  >
+                    Path
+                  </button>
+                </div>
+                {modelSource === "downloaded" ? (
+                  <label className="field">
+                    <span>Profile</span>
+                    <select
+                      value={selectedModel}
+                      onChange={(event) => chooseDownloadedModel(event.target.value)}
+                      disabled={downloadedModels.length === 0 || isSending}
+                    >
+                      {downloadedModels.length === 0 ? (
+                        <option value="">No downloaded models</option>
+                      ) : (
+                        downloadedModels.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    {selectedDownloadedModel?.local_path && (
+                      <small>{selectedDownloadedModel.local_path}</small>
                     )}
-                  </select>
-                  {selectedDownloadedModel?.local_path && (
-                    <small>{selectedDownloadedModel.local_path}</small>
-                  )}
-                </label>
-              ) : (
-                <label className="field">
-                  <span>Path</span>
-                  <input
-                    value={modelPath}
-                    onChange={(event) => setModelPath(event.target.value)}
-                    disabled={isSending}
-                    list="downloaded-model-paths"
-                    placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
-                  />
-                  <datalist id="downloaded-model-paths">
-                    {downloadedModels
-                      .filter((model) => model.local_path)
-                      .map((model) => (
-                        <option key={model.id} value={model.local_path ?? ""}>
-                          {model.label}
-                        </option>
-                      ))}
-                  </datalist>
-                </label>
-              )}
+                  </label>
+                ) : (
+                  <label className="field">
+                    <span>Path</span>
+                    <input
+                      value={modelPath}
+                      onChange={(event) => setModelPath(event.target.value)}
+                      disabled={isSending}
+                      list="downloaded-model-paths"
+                      placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
+                    />
+                    <datalist id="downloaded-model-paths">
+                      {downloadedModels
+                        .filter((model) => model.local_path)
+                        .map((model) => (
+                          <option key={model.id} value={model.local_path ?? ""}>
+                            {model.label}
+                          </option>
+                        ))}
+                    </datalist>
+                  </label>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="panel-block">
-            <div className="block-heading">
-              <Activity size={18} />
-              <strong>Thinking</strong>
+            <div className="panel-block">
+              <div className="block-heading">
+                <Activity size={18} />
+                <strong>Thinking</strong>
+              </div>
+              <label className="switch-row">
+                <span className="switch-copy">
+                  <strong>Show summary</strong>
+                  <small>Ask for a brief visible reasoning summary before the answer.</small>
+                </span>
+                <input
+                  aria-label="Show thinking summary"
+                  checked={showThinking}
+                  className="switch-control"
+                  disabled={isSending}
+                  onChange={(event) => setShowThinking(event.target.checked)}
+                  type="checkbox"
+                />
+              </label>
             </div>
-            <label className="switch-row">
-              <span className="switch-copy">
-                <strong>Show summary</strong>
-                <small>Ask for a brief visible reasoning summary before the answer.</small>
-              </span>
-              <input
-                aria-label="Show thinking summary"
-                checked={showThinking}
-                className="switch-control"
-                disabled={isSending}
-                onChange={(event) => setShowThinking(event.target.checked)}
-                type="checkbox"
+            {inferenceStatus && !inferenceReady && (
+              <InferenceSetup
+                status={inferenceStatus}
+                job={installJob}
+                isInstalling={Boolean(isInstalling)}
+                onInstall={startInstall}
               />
-            </label>
-          </div>
-          {inferenceStatus && !inferenceReady && (
-            <InferenceSetup
-              status={inferenceStatus}
-              job={installJob}
-              isInstalling={Boolean(isInstalling)}
-              onInstall={startInstall}
-            />
-          )}
+            )}
+          </section>
+          <ModelMemoryCard memory={inferenceStatus?.model_memory ?? null} />
         </aside>
       </div>
     </>
+  );
+}
+
+function ModelMemoryCard({ memory }: { memory: ModelMemoryStatus | null }) {
+  const loadedModel = memory?.loaded_models[0];
+  const value = memory
+    ? formatOptionalBytes(memory.model_memory_bytes, memory.loaded ? "Unavailable" : "Not loaded")
+    : "Loading";
+  const processValue = formatOptionalBytes(memory?.process_memory_bytes ?? null);
+  const modelLabel = memory
+    ? memory.loaded
+      ? memory.loaded_count === 1
+        ? loadedModel?.id ?? "Loaded model"
+        : `${memory.loaded_count} models loaded`
+      : "No model loaded"
+    : "Loading";
+
+  return (
+    <section className="panel memory-card" aria-label="Model memory usage">
+      <div className="block-heading">
+        <Cpu size={18} />
+        <strong>Model memory</strong>
+      </div>
+      <strong className="memory-value">{value}</strong>
+      <p>{memory?.note ?? "Reading local memory status..."}</p>
+      <dl className="memory-details">
+        <div>
+          <dt>Loaded</dt>
+          <dd>{modelLabel}</dd>
+        </div>
+        <div>
+          <dt>Process</dt>
+          <dd>{processValue}</dd>
+        </div>
+      </dl>
+      {loadedModel?.path && <small>{loadedModel.path}</small>}
+    </section>
   );
 }
 
@@ -1126,6 +1180,17 @@ function SystemPanel() {
       <div className="stats-grid">
         <MetricCard label="Machine" value={system?.machine ?? "Loading"} />
         <MetricCard label="Memory" value={system ? `${system.total_memory_gb} GB` : "Loading"} />
+        <MetricCard
+          label="Model Memory"
+          value={
+            inference
+              ? formatOptionalBytes(
+                  inference.model_memory.model_memory_bytes,
+                  inference.model_memory.loaded ? "Unavailable" : "Not loaded",
+                )
+              : "Loading"
+          }
+        />
         <MetricCard label="Python" value={system?.python_version ?? "Loading"} />
         <MetricCard label="MLX" value={inference?.available ? "Installed" : "Missing"} />
       </div>
@@ -1236,6 +1301,10 @@ function formatBytes(bytes: number) {
     unitIndex += 1;
   }
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+}
+
+function formatOptionalBytes(bytes: number | null | undefined, fallback = "Unavailable") {
+  return typeof bytes === "number" ? formatBytes(bytes) : fallback;
 }
 
 function formatCommand(command: string[]) {

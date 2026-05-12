@@ -109,6 +109,7 @@ def test_inference_status_and_install_routes(monkeypatch) -> None:
 
     assert status_response.status_code == 200
     assert status_response.json()["available"] is False
+    assert status_response.json()["model_memory"]["loaded"] is False
     assert install_response.status_code == 200
     assert install_response.json()["id"] == job.id
     assert job_response.status_code == 200

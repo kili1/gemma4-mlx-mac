@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -61,6 +63,21 @@ class GeneratedToken:
     finish_reason: str | None = None
 
 
+class LoadedModelMemory(BaseModel):
+    id: str
+    path: str
+
+
+class ModelMemoryStatus(BaseModel):
+    loaded: bool
+    loaded_count: int
+    loaded_models: list[LoadedModelMemory]
+    process_memory_bytes: int | None
+    baseline_memory_bytes: int | None
+    model_memory_bytes: int | None
+    note: str
+
+
 ModelLoader = Callable[[str], tuple[Any, Any]]
 StreamGenerator = Callable[..., Iterable[Any]]
 SamplerFactory = Callable[[float], Callable[..., Any]]
@@ -80,6 +97,7 @@ class ChatService:
         self._sampler_factory = sampler_factory
         self._model_path_resolver = model_path_resolver
         self._loaded_models: dict[str, LoadedChatModel] = {}
+        self._baseline_memory_bytes = _process_resident_memory_bytes()
         self._lock = RLock()
 
     def create_completion(self, request: ChatCompletionRequest) -> dict:
@@ -161,6 +179,38 @@ class ChatService:
             raise
         except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
             raise InferenceError(f"MLX generation failed: {exc}") from exc
+
+    def memory_status(self) -> ModelMemoryStatus:
+        process_memory_bytes = _process_resident_memory_bytes()
+        with self._lock:
+            loaded_models = [
+                LoadedModelMemory(id=model_id, path=loaded.path)
+                for model_id, loaded in self._loaded_models.items()
+            ]
+
+        model_memory_bytes: int | None
+        if not loaded_models:
+            model_memory_bytes = 0 if process_memory_bytes is not None else None
+            note = "No model is loaded yet. Send a chat message to load one into unified memory."
+        elif process_memory_bytes is None or self._baseline_memory_bytes is None:
+            model_memory_bytes = None
+            note = "Model is loaded, but process memory could not be read on this system."
+        else:
+            model_memory_bytes = max(process_memory_bytes - self._baseline_memory_bytes, 0)
+            note = (
+                "Approximate model footprint based on process resident memory delta since "
+                "the server started."
+            )
+
+        return ModelMemoryStatus(
+            loaded=bool(loaded_models),
+            loaded_count=len(loaded_models),
+            loaded_models=loaded_models,
+            process_memory_bytes=process_memory_bytes,
+            baseline_memory_bytes=self._baseline_memory_bytes,
+            model_memory_bytes=model_memory_bytes,
+            note=note,
+        )
 
     def _load_model(self, model_id: str) -> LoadedChatModel:
         with self._lock:
@@ -362,6 +412,20 @@ def _safe_marker_boundary(text: str, start: int, marker: str) -> int:
         if marker.startswith(lower[tail_start:]):
             return tail_start
     return len(text)
+
+
+def _process_resident_memory_bytes() -> int | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rss_kb = int(result.stdout.strip().splitlines()[0])
+    except (IndexError, OSError, subprocess.CalledProcessError, ValueError):
+        return None
+    return rss_kb * 1024
 
 
 def _existing_model_path(value: str) -> Path | None:

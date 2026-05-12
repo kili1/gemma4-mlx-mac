@@ -79,7 +79,9 @@ def list_model_downloads() -> dict:
 
 @router.get("/api/inference/status")
 def get_inference_status() -> dict:
-    return mlx_installer.status().model_dump(mode="json")
+    status = mlx_installer.status().model_dump(mode="json")
+    status["model_memory"] = chat_service.memory_status().model_dump(mode="json")
+    return status
 
 
 @router.post("/api/inference/install")

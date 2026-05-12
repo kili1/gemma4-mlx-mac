@@ -153,6 +153,35 @@ def test_chat_service_streams_token_metrics() -> None:
     assert chunks[-1].tokens_per_second > 0
 
 
+def test_chat_service_reports_loaded_model_memory(monkeypatch) -> None:
+    memory_readings = [1000, 7000]
+    monkeypatch.setattr(inference, "_process_resident_memory_bytes", lambda: memory_readings[0])
+    service = ChatService(
+        model_loader=lambda _model_path: (object(), FakeTokenizer()),
+        stream_generator=lambda *_args, **_kwargs: [SimpleNamespace(text="ok")],
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: "/tmp/gemma",
+    )
+
+    unloaded = service.memory_status()
+    assert unloaded.loaded is False
+    assert unloaded.model_memory_bytes == 0
+
+    service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[ChatMessage(role="user", content="hello")],
+        )
+    )
+    memory_readings[0] = 7000
+
+    loaded = service.memory_status()
+    assert loaded.loaded is True
+    assert loaded.loaded_count == 1
+    assert loaded.loaded_models[0].path == "/tmp/gemma"
+    assert loaded.model_memory_bytes == 6000
+
+
 def test_default_loader_falls_back_for_unused_gemma4_weights(monkeypatch) -> None:
     def strict_loader(model_path: str):
         assert model_path == "/tmp/gemma"

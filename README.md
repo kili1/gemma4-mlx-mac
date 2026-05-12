@@ -157,6 +157,8 @@ Streaming responses are Server-Sent Events. Each chunk includes an OpenAI-style 
 
 Set `show_thinking: true` in chat requests, or enable Thinking in the Chat tab, to ask the model for a brief visible reasoning summary before the answer. Raw `<think>...</think>` blocks are filtered from responses.
 
+The Chat and System views include a Model memory card. It reports whether a model is loaded and shows an approximate resident-memory delta since the server started, which is the app's practical view of Apple Silicon unified-memory pressure.
+
 ## Fine-Tuning
 
 V1 focuses on text LoRA/QLoRA. The current UI and API validate datasets and create starter jobs; MLX training execution will run behind the same job interface.
