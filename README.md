@@ -2,17 +2,21 @@
 
 Run, chat with, and fine-tune Gemma 4 locally on Apple Silicon with MLX unified memory.
 
-`gemma4-mlx-mac` is an open source starter for a local-first Mac app around the Gemma 4 open model family. It provides a Python CLI, FastAPI backend, OpenAI-compatible chat endpoint, frontend scaffold, and a text LoRA/QLoRA fine-tuning path built around MLX.
+`gemma4-mlx-mac` is a local-first Mac app for the Gemma 4 open model family. It includes a Python CLI, FastAPI backend, React frontend, Hugging Face model downloads with progress, MLX dependency setup, OpenAI-compatible chat, and starter LoRA/QLoRA fine-tuning workflows.
 
-> Status: pre-alpha scaffold. The public API shape, project layout, docs, and tests are in place. Full MLX inference and training execution will land behind the interfaces in this starter.
+> Status: pre-alpha, but usable. Local MLX text inference is wired through `mlx_lm.stream_generate`; training execution is still a starter job interface.
 
-## Goals
+## Features
 
-- One easy install for Mac users: `uv tool install gemma4-mlx-mac` or `pipx install gemma4-mlx-mac`.
-- Local-only by default. No hosted API, no telemetry, and no bundled model weights.
-- Sensible first-run default: `mlx-community/gemma-4-e2b-it-4bit`.
-- Clear upgrade path for larger Gemma 4 models, adapters, prompt caching, and multimodal support.
-- Friendly fine-tuning for chat, completion, and plain text JSONL datasets.
+- Local-only operation: no hosted API, no telemetry, and no bundled model weights.
+- Default model profile: `mlx-community/gemma-4-e2b-it-4bit`.
+- One-click MLX install from the Chat tab when `mlx` / `mlx_lm` are missing.
+- Hugging Face model download from the Models tab or CLI, with live progress.
+- Optional download folder selection before starting a model download.
+- Chat model selection from downloaded models, plus direct local snapshot path entry.
+- Streaming chat output with live token count and tokens/sec.
+- OpenAI-compatible `/v1/chat/completions` route, including SSE streaming when `stream: true`.
+- Starter Fine-tune, Adapters, Models, Chat, and System views in the frontend.
 
 ## Quick Start
 
@@ -41,51 +45,71 @@ Start the local app:
 gemma4-mlx-mac serve --open
 ```
 
-The Chat tab only lets you select downloaded model profiles by default. You can also switch to Path and point chat at an existing local MLX model snapshot directory.
-
-If the MLX optional dependencies are not installed, the Chat tab shows an Install MLX action that installs the `mlx` extra into the current Python environment and streams the local install log.
-
-List the built-in model profiles:
-
-```bash
-gemma4-mlx-mac models
-```
-
-Download the default Gemma 4 MLX model snapshot from Hugging Face:
-
-```bash
-gemma4-mlx-mac download
-```
-
-The CLI shows live byte/file progress. The web UI starts downloads in the background, shows progress in the Models tab, and lets you set a local download folder before starting a model download.
-
-For gated models, authenticate first:
-
-```bash
-huggingface-cli login
-gemma4-mlx-mac download --model mlx-community/gemma-4-e2b-it-4bit
-```
+Open the app, install MLX if prompted, download a model, then chat locally.
 
 ## MLX Dependencies
 
-The base package intentionally keeps CI and docs lightweight. On Apple Silicon, install the MLX extras before running real local inference or fine-tuning:
-
-```bash
-uv tool install "gemma4-mlx-mac[mlx]"
-```
-
-From a source checkout or existing install, you can also run:
+The base package keeps CI and basic commands lightweight. For real local inference or future fine-tuning execution, install the MLX extra:
 
 ```bash
 gemma4-mlx-mac install-mlx
 ```
 
-The project is designed around:
+You can also install the extra directly:
 
-- `mlx-lm` for text generation, serving integration, adapters, LoRA, and QLoRA.
+```bash
+uv tool install "gemma4-mlx-mac[mlx]"
+```
+
+The project uses:
+
+- `mlx-lm` for text generation, streaming, adapters, LoRA, and QLoRA.
 - `mlx-vlm` for future Gemma 4 image, audio, and video support.
 
-## API Shape
+## Models
+
+List built-in model profiles:
+
+```bash
+gemma4-mlx-mac models
+```
+
+Download the default Gemma 4 MLX model snapshot:
+
+```bash
+gemma4-mlx-mac download
+```
+
+Download a specific model:
+
+```bash
+gemma4-mlx-mac download --model mlx-community/gemma-4-e2b-it-4bit
+```
+
+The CLI shows byte/file progress. The web UI also shows download progress and lets you set a target folder such as `~/Models/gemma4` before downloading.
+
+For gated models, authenticate first:
+
+```bash
+huggingface-cli login
+```
+
+## Chat
+
+The Chat tab supports two model sources:
+
+- **Downloaded**: only shows model profiles available locally.
+- **Path**: points directly at an existing local MLX model snapshot directory.
+
+Responses stream token-by-token. The assistant message displays generated token count and tokens/sec as the model runs.
+
+CLI one-shot chat is also available:
+
+```bash
+gemma4-mlx-mac chat "Say hello in one sentence."
+```
+
+## API
 
 The backend exposes:
 
@@ -100,13 +124,41 @@ The backend exposes:
 - `POST /v1/chat/completions`
 - `POST /api/tunes`
 - `GET /api/tunes/{id}`
+- `GET /api/adapters`
 - `POST /api/adapters/{id}/activate`
 
-The OpenAI-compatible chat route uses `mlx_lm.stream_generate` after the selected model is downloaded and the MLX extra is installed.
+Non-streaming chat:
+
+```bash
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/gemma-4-e2b-it-4bit",
+    "messages": [{"role": "user", "content": "Say hello."}],
+    "max_tokens": 64
+  }'
+```
+
+Streaming chat with token metrics:
+
+```bash
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/gemma-4-e2b-it-4bit",
+    "messages": [{"role": "user", "content": "Say hello."}],
+    "max_tokens": 64,
+    "stream": true
+  }'
+```
+
+Streaming responses are Server-Sent Events. Each chunk includes an OpenAI-style `delta.content` plus `metrics.completion_tokens`, `metrics.elapsed_seconds`, and `metrics.tokens_per_second`.
 
 ## Fine-Tuning
 
-V1 focuses on text LoRA/QLoRA. Supported dataset shapes follow the MLX-LM conventions:
+V1 focuses on text LoRA/QLoRA. The current UI and API validate datasets and create starter jobs; MLX training execution will run behind the same job interface.
+
+Supported JSONL shapes:
 
 ```jsonl
 {"messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"Hello"},{"role":"assistant","content":"Hi!"}]}
@@ -115,6 +167,29 @@ V1 focuses on text LoRA/QLoRA. Supported dataset shapes follow the MLX-LM conven
 ```
 
 See [docs/finetuning.md](docs/finetuning.md) for the expected workflow and memory tradeoffs.
+
+## Development
+
+Install dependencies:
+
+```bash
+uv pip install -e ".[dev]"
+```
+
+Run checks:
+
+```bash
+uv run --extra dev ruff check .
+uv run --extra dev pytest
+```
+
+Build the frontend into the Python package:
+
+```bash
+cd frontend
+npm install
+npm run build
+```
 
 ## References
 
