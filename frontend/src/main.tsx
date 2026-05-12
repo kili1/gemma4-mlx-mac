@@ -1,6 +1,14 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Activity, Bot, Cpu, Database, Download, SlidersHorizontal } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  Cpu,
+  Database,
+  Download,
+  SlidersHorizontal,
+  Wrench
+} from "lucide-react";
 import "./styles.css";
 
 type View = "chat" | "models" | "tune" | "adapters" | "system";
@@ -25,6 +33,26 @@ type DownloadJob = {
   path: string | null;
   error: string | null;
   message: string;
+};
+type MlxInstallJob = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  command: string[];
+  cwd: string | null;
+  output: string[];
+  returncode: number | null;
+  error: string | null;
+  message: string;
+};
+type InferenceStatus = {
+  available: boolean;
+  installing: boolean;
+  install_job_id: string | null;
+  command: string[];
+  cwd: string | null;
+  message: string;
+  error: string | null;
+  job: MlxInstallJob | null;
 };
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
@@ -105,35 +133,108 @@ function ChatPanel() {
   const [message, setMessage] = React.useState("");
   const [reply, setReply] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
+  const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus | null>(null);
+  const [installJob, setInstallJob] = React.useState<MlxInstallJob | null>(null);
   const downloadedModels = models.filter((model) => model.downloaded);
+  const inferenceReady = inferenceStatus?.available === true;
+  const isInstalling =
+    installJob?.status === "queued" || installJob?.status === "running" || inferenceStatus?.installing;
 
   React.useEffect(() => {
-    fetch("/api/models")
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Could not load models.");
-        }
-        return response.json();
-      })
-      .then((data: { models: ModelProfile[] }) => {
-        setModels(data.models);
-        const availableModels = data.models.filter((model) => model.downloaded);
-        const defaultModel =
-          availableModels.find((model) => model.default) ?? availableModels[0];
-        if (defaultModel) {
-          setSelectedModel(defaultModel.id);
-        } else {
-          setSelectedModel("");
-          setMessage("Download a model in the Models tab before chatting.");
-        }
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : "Could not load models.");
-      });
+    loadModels();
+    loadInferenceStatus();
   }, []);
+
+  async function loadModels() {
+    try {
+      const response = await fetch("/api/models");
+      if (!response.ok) {
+        throw new Error("Could not load models.");
+      }
+      const data: { models: ModelProfile[] } = await response.json();
+      setModels(data.models);
+      const availableModels = data.models.filter((model) => model.downloaded);
+      const defaultModel = availableModels.find((model) => model.default) ?? availableModels[0];
+      if (defaultModel) {
+        setSelectedModel(defaultModel.id);
+      } else {
+        setSelectedModel("");
+        setMessage("Download a model in the Models tab before chatting.");
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Could not load models.");
+    }
+  }
+
+  async function loadInferenceStatus() {
+    try {
+      const response = await fetch("/api/inference/status");
+      if (!response.ok) {
+        throw new Error("Could not read MLX status.");
+      }
+      const status: InferenceStatus = await response.json();
+      setInferenceStatus(status);
+      if (status.job) {
+        setInstallJob(status.job);
+      }
+      const installJobId = status.install_job_id;
+      if (status.installing && installJobId) {
+        window.setTimeout(() => pollInstall(installJobId), 1000);
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Could not read MLX status.");
+    }
+  }
+
+  async function startInstall() {
+    setMessage("");
+    try {
+      const response = await fetch("/api/inference/install", { method: "POST" });
+      const job: MlxInstallJob = await response.json();
+      if (!response.ok) {
+        throw new Error(job.error ?? "Could not start MLX install.");
+      }
+      setInstallJob(job);
+      setInferenceStatus((current) =>
+        current ? { ...current, installing: job.status !== "succeeded", job } : current
+      );
+      if (job.status === "queued" || job.status === "running") {
+        pollInstall(job.id);
+      } else {
+        loadInferenceStatus();
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Could not start MLX install.");
+    }
+  }
+
+  async function pollInstall(jobId: string) {
+    try {
+      const response = await fetch(`/api/inference/install/${jobId}`);
+      const job: MlxInstallJob = await response.json();
+      if (!response.ok) {
+        throw new Error(job.error ?? "Could not read MLX install progress.");
+      }
+      setInstallJob(job);
+      if (job.status === "queued" || job.status === "running") {
+        window.setTimeout(() => pollInstall(jobId), 1000);
+        return;
+      }
+      loadInferenceStatus();
+      if (job.status === "failed") {
+        setMessage(job.error ?? "MLX install failed.");
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Could not read MLX install progress.");
+    }
+  }
 
   async function sendPrompt() {
     const content = prompt.trim();
+    if (!inferenceReady) {
+      setMessage("Install MLX inference before chatting.");
+      return;
+    }
     if (!selectedModel) {
       setMessage("Download a model in the Models tab before chatting.");
       return;
@@ -190,6 +291,14 @@ function ChatPanel() {
           </select>
         </label>
       </div>
+      {inferenceStatus && !inferenceReady && (
+        <InferenceSetup
+          status={inferenceStatus}
+          job={installJob}
+          isInstalling={Boolean(isInstalling)}
+          onInstall={startInstall}
+        />
+      )}
       {message && <p className="notice">{message}</p>}
       <textarea
         value={prompt}
@@ -198,7 +307,11 @@ function ChatPanel() {
       />
       <div className="chat-actions">
         <span>{selectedModel || "No downloaded model selected"}</span>
-        <button className="primary" disabled={isSending || !selectedModel} onClick={sendPrompt}>
+        <button
+          className="primary"
+          disabled={isSending || !selectedModel || !inferenceReady}
+          onClick={sendPrompt}
+        >
           {isSending ? "Sending" : "Send"}
         </button>
       </div>
@@ -208,6 +321,44 @@ function ChatPanel() {
         </section>
       )}
     </>
+  );
+}
+
+function InferenceSetup({
+  status,
+  job,
+  isInstalling,
+  onInstall
+}: {
+  status: InferenceStatus;
+  job: MlxInstallJob | null;
+  isInstalling: boolean;
+  onInstall: () => void;
+}) {
+  const output = job?.output.slice(-8) ?? [];
+
+  return (
+    <section className="setup-panel" aria-label="MLX inference setup">
+      <div>
+        <strong>MLX inference is not installed</strong>
+        <p>{status.message}</p>
+        <code>{formatCommand(status.command)}</code>
+      </div>
+      <button className="secondary" disabled={isInstalling} onClick={onInstall}>
+        <Wrench size={18} />
+        <span>{isInstalling ? "Installing" : "Install MLX"}</span>
+      </button>
+      {job && (
+        <div className="setup-progress">
+          <div className="progress-meta">
+            <span>{job.status}</span>
+            <span>{job.returncode === null ? "Running locally" : `Exit ${job.returncode}`}</span>
+          </div>
+          <p>{job.error ?? job.message}</p>
+          {output.length > 0 && <pre>{output.join("\n")}</pre>}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -366,6 +517,10 @@ function formatBytes(bytes: number) {
     unitIndex += 1;
   }
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+}
+
+function formatCommand(command: string[]) {
+  return command.map((part) => (/\s/.test(part) ? `"${part}"` : part)).join(" ");
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

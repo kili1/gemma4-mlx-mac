@@ -43,6 +43,8 @@ gemma4-mlx-mac serve --open
 
 The Chat tab only lets you select models that are already downloaded locally. Use the Models tab or the CLI download command to make more models available for chat.
 
+If the MLX optional dependencies are not installed, the Chat tab shows an Install MLX action that installs the `mlx` extra into the current Python environment and streams the local install log.
+
 List the built-in model profiles:
 
 ```bash
@@ -72,6 +74,12 @@ The base package intentionally keeps CI and docs lightweight. On Apple Silicon, 
 uv tool install "gemma4-mlx-mac[mlx]"
 ```
 
+From a source checkout or existing install, you can also run:
+
+```bash
+gemma4-mlx-mac install-mlx
+```
+
 The project is designed around:
 
 - `mlx-lm` for text generation, serving integration, adapters, LoRA, and QLoRA.
@@ -86,12 +94,15 @@ The backend exposes:
 - `POST /api/models/download`
 - `GET /api/models/download/{job_id}`
 - `GET /api/models/downloads`
+- `GET /api/inference/status`
+- `POST /api/inference/install`
+- `GET /api/inference/install/{job_id}`
 - `POST /v1/chat/completions`
 - `POST /api/tunes`
 - `GET /api/tunes/{id}`
 - `POST /api/adapters/{id}/activate`
 
-The OpenAI-compatible chat route is present from day one so clients can be built against a stable shape while MLX execution is implemented behind it.
+The OpenAI-compatible chat route uses `mlx_lm.stream_generate` after the selected model is downloaded and the MLX extra is installed.
 
 ## Fine-Tuning
 

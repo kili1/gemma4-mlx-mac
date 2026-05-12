@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from gemma4_mlx_mac import api
 from gemma4_mlx_mac.app import create_app
 from gemma4_mlx_mac.downloads import ModelDownloader, ModelDownloadJobStore
+from gemma4_mlx_mac.mlx_setup import MlxInstallJob, MlxStatus
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 
 
@@ -67,7 +68,66 @@ def test_frontend_shell_is_served() -> None:
     assert "gemma4-mlx-mac" in response.text
 
 
-def test_chat_route_shape_returns_not_implemented() -> None:
+def test_inference_status_and_install_routes(monkeypatch) -> None:
+    job = MlxInstallJob(
+        id="job-1",
+        status="running",
+        command=["uv", "pip", "install", "gemma4-mlx-mac[mlx]"],
+        message="Installing MLX inference dependencies...",
+        created_at="2026-05-12T00:00:00Z",
+    )
+
+    class FakeInstaller:
+        def status(self) -> MlxStatus:
+            return MlxStatus(
+                available=False,
+                installing=True,
+                install_job_id=job.id,
+                command=job.command,
+                message="Installing MLX inference dependencies...",
+                job=job,
+            )
+
+        def start(self) -> MlxInstallJob:
+            return job
+
+        def get(self, job_id: str) -> MlxInstallJob | None:
+            return job if job_id == job.id else None
+
+    monkeypatch.setattr(api, "mlx_installer", FakeInstaller())
+    client = TestClient(create_app())
+
+    status_response = client.get("/api/inference/status")
+    install_response = client.post("/api/inference/install")
+    job_response = client.get(f"/api/inference/install/{job.id}")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["available"] is False
+    assert install_response.status_code == 200
+    assert install_response.json()["id"] == job.id
+    assert job_response.status_code == 200
+    assert job_response.json()["status"] == "running"
+
+
+def test_chat_route_shape_returns_completion(monkeypatch) -> None:
+    class FakeChatService:
+        def create_completion(self, request) -> dict:
+            assert request.model == DEFAULT_MODEL_ID
+            return {
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello back"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(api, "chat_service", FakeChatService())
     client = TestClient(create_app())
 
     response = client.post(
@@ -78,8 +138,8 @@ def test_chat_route_shape_returns_not_implemented() -> None:
         },
     )
 
-    assert response.status_code == 501
-    assert response.json()["error"]["type"] == "not_implemented"
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "hello back"
 
 
 def test_tune_job_route_validates_dataset() -> None:

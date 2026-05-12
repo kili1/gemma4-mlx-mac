@@ -204,6 +204,55 @@ select {
   margin: 0 0 16px;
 }
 
+.setup-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  border: 1px solid #d4dce5;
+  border-radius: 8px;
+  background: #f7fafb;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+.setup-panel p {
+  margin: 6px 0 10px;
+  color: #44505c;
+}
+
+.setup-panel code {
+  display: block;
+  color: #17202a;
+  background: #ffffff;
+  border: 1px solid #d9dee4;
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.setup-progress {
+  grid-column: 1 / -1;
+  border-top: 1px solid #e3e8ee;
+  padding-top: 12px;
+}
+
+.setup-progress p {
+  margin: 8px 0;
+}
+
+.setup-progress pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  background: #17202a;
+  color: #f5f7f8;
+  border-radius: 6px;
+  padding: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .model-list {
   display: grid;
   gap: 10px;
@@ -275,7 +324,8 @@ select {
 @media (max-width: 640px) {
   .topbar,
   .chat-header,
-  .model-row {
+  .model-row,
+  .setup-panel {
     grid-template-columns: 1fr;
   }
 

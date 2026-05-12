@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import webbrowser
 from pathlib import Path
 
@@ -26,6 +27,14 @@ from .downloads import (
     ModelDownloadProgress,
     ModelDownloadRequest,
 )
+from .inference import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ChatService,
+    InferenceError,
+    InferenceNotReady,
+)
+from .mlx_setup import build_mlx_install_command, is_mlx_available
 from .models import DEFAULT_MODEL_ID, list_model_profiles
 from .system import collect_system_info
 from .tuning import TuneJobStore, TuneRequest
@@ -83,11 +92,41 @@ def serve(
 def chat(
     prompt: str = typer.Argument(..., help="Prompt to send to the local model."),
     model: str = typer.Option(DEFAULT_MODEL_ID, help="Model profile to use."),
+    max_tokens: int = typer.Option(512, min=1, help="Maximum tokens to generate."),
+    temperature: float = typer.Option(0.7, min=0, help="Sampling temperature."),
 ) -> None:
     """Send a one-shot chat prompt."""
-    console.print(f"Chat command received for {model}.")
-    console.print("MLX chat execution will be implemented behind the ChatService interface.")
-    console.print(prompt)
+    request = ChatCompletionRequest(
+        model=model,
+        messages=[ChatMessage(role="user", content=prompt)],
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    try:
+        response = ChatService().create_completion(request)
+    except (InferenceNotReady, InferenceError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(response["choices"][0]["message"]["content"])
+
+
+@app.command("install-mlx")
+def install_mlx() -> None:
+    """Install the optional MLX inference dependencies into this Python environment."""
+    if is_mlx_available():
+        console.print("MLX inference dependencies are already installed.")
+        return
+
+    command = build_mlx_install_command()
+    console.print(f"Running: {command.display}", markup=False)
+    result = subprocess.run(command.argv, cwd=command.cwd, check=False)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+    if not is_mlx_available():
+        console.print("[red]Install finished, but mlx_lm is still not importable.[/red]")
+        raise typer.Exit(1)
+    console.print("MLX inference dependencies are installed.")
 
 
 @app.command("models")

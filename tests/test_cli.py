@@ -38,3 +38,12 @@ def test_cli_download_command(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "Downloaded" in result.output
+
+
+def test_cli_install_mlx_already_available(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "is_mlx_available", lambda: True)
+
+    result = runner.invoke(app, ["install-mlx"])
+
+    assert result.exit_code == 0
+    assert "already installed" in result.output

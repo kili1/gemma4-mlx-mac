@@ -7,7 +7,7 @@
 3. Local services for system detection, model profiles, adapters, datasets, tuning jobs, and inference.
 4. A React/Vite frontend that talks to the local API.
 
-The base package avoids importing MLX at module import time. This keeps commands like `doctor`, API tests, and CI useful on machines that do not have Apple Silicon. MLX-backed implementations should be loaded lazily inside service methods.
+The base package avoids importing MLX at module import time. This keeps commands like `doctor`, API tests, and CI useful on machines that do not have Apple Silicon. MLX-backed implementations are loaded lazily inside service methods, and `/api/inference/install` can install the optional `mlx` extra into the active Python environment from the local UI.
 
 ## Default Model
 
