@@ -155,7 +155,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 Streaming responses are Server-Sent Events. Each chunk includes an OpenAI-style `delta.content` plus `metrics.completion_tokens`, `metrics.elapsed_seconds`, and `metrics.tokens_per_second`.
 
-Set `show_thinking: true` in chat requests, or enable Thinking in the Chat tab, to ask the model for a brief visible reasoning summary before the answer. Raw `<think>...</think>` blocks are filtered from responses.
+Set `show_thinking: true` in chat requests, or enable Thinking in the Chat tab, to enforce a `Thinking:` plus `Answer:` response shape. Raw `<think>...</think>` blocks are filtered from responses, and if the model ignores the requested visible summary the server wraps the answer with a clear fallback note.
 
 The Chat and System views include a Model memory card. It reports whether a model is loaded and shows an approximate resident-memory delta since the server started, which is the app's practical view of Apple Silicon unified-memory pressure.
 

@@ -98,6 +98,53 @@ def test_chat_service_can_request_visible_thinking_summary() -> None:
 
     assert "Thinking:" in tokenizer.messages[0]["content"]
     assert "Answer:" in tokenizer.messages[0]["content"]
+    assert "MUST start every response" in tokenizer.messages[0]["content"]
+
+
+def test_chat_service_enforces_visible_thinking_format_when_missing() -> None:
+    service = ChatService(
+        model_loader=lambda _model_path: (object(), FakeTokenizer()),
+        stream_generator=lambda *_args, **_kwargs: [SimpleNamespace(text="plain answer")],
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: "/tmp/gemma",
+    )
+
+    response = service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[ChatMessage(role="user", content="hello")],
+            show_thinking=True,
+        )
+    )
+
+    content = response["choices"][0]["message"]["content"]
+    assert content.startswith("Thinking:\n- No separate visible reasoning summary")
+    assert "\n\nAnswer:\nplain answer" in content
+
+
+def test_chat_service_preserves_visible_thinking_format_when_present() -> None:
+    def fake_stream_generate(*_args, **_kwargs):
+        yield SimpleNamespace(text="Think")
+        yield SimpleNamespace(text="ing:\n- Check the request.\n\nAnswer:\nDone.")
+
+    service = ChatService(
+        model_loader=lambda _model_path: (object(), FakeTokenizer()),
+        stream_generator=fake_stream_generate,
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: "/tmp/gemma",
+    )
+
+    response = service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[ChatMessage(role="user", content="hello")],
+            show_thinking=True,
+        )
+    )
+
+    content = response["choices"][0]["message"]["content"]
+    assert content == "Thinking:\n- Check the request.\n\nAnswer:\nDone."
+    assert content.count("Thinking:") == 1
 
 
 def test_chat_service_strips_private_thinking_tags() -> None:
@@ -118,7 +165,6 @@ def test_chat_service_strips_private_thinking_tags() -> None:
             ChatCompletionRequest(
                 model=DEFAULT_MODEL_ID,
                 messages=[ChatMessage(role="user", content="hello")],
-                show_thinking=True,
             )
         )
     )
