@@ -9,6 +9,7 @@ import {
   Cpu,
   Database,
   Download,
+  FileText,
   FolderOpen,
   HardDrive,
   MessageSquareText,
@@ -100,6 +101,14 @@ type TuneJob = {
     }>;
   };
   message: string;
+};
+type SyntheticFormat = "chat" | "completion" | "text";
+type SyntheticDatasetResult = {
+  data_path: string;
+  train_path: string;
+  format: SyntheticFormat;
+  examples: number;
+  report: TuneJob["dataset"];
 };
 type AdapterInfo = {
   id: string;
@@ -768,9 +777,15 @@ function TunePanel() {
   const [adapterName, setAdapterName] = React.useState("demo-adapter");
   const [iters, setIters] = React.useState(100);
   const [batchSize, setBatchSize] = React.useState(1);
+  const [syntheticTopic, setSyntheticTopic] = React.useState("local Apple Silicon AI");
+  const [syntheticExamples, setSyntheticExamples] = React.useState(24);
+  const [syntheticFormat, setSyntheticFormat] = React.useState<SyntheticFormat>("chat");
+  const [syntheticOutput, setSyntheticOutput] = React.useState("examples/synthetic");
   const [message, setMessage] = React.useState("");
   const [job, setJob] = React.useState<TuneJob | null>(null);
+  const [syntheticResult, setSyntheticResult] = React.useState<SyntheticDatasetResult | null>(null);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [isGeneratingData, setIsGeneratingData] = React.useState(false);
 
   React.useEffect(() => {
     fetch("/api/models")
@@ -810,6 +825,38 @@ function TunePanel() {
     }
   }
 
+  async function generateSyntheticData() {
+    setIsGeneratingData(true);
+    setMessage("");
+    setSyntheticResult(null);
+    try {
+      const response = await fetch("/api/datasets/synthetic", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: syntheticTopic,
+          examples: syntheticExamples,
+          output_dir: syntheticOutput,
+          format: syntheticFormat,
+          system_prompt: "You are a concise, helpful assistant."
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Synthetic dataset generation failed.");
+      }
+      setSyntheticResult(data);
+      setDataPath(data.data_path);
+      setMessage(`Synthetic dataset created at ${data.train_path}.`);
+    } catch (error: unknown) {
+      setMessage(
+        error instanceof Error ? error.message : "Synthetic dataset generation failed.",
+      );
+    } finally {
+      setIsGeneratingData(false);
+    }
+  }
+
   return (
     <>
       <PageHeader title="Fine-tune" eyebrow="LoRA jobs">
@@ -817,51 +864,130 @@ function TunePanel() {
       </PageHeader>
       {message && <p className="notice">{message}</p>}
       <div className="two-column">
-        <section className="panel form-panel">
-          <label className="field">
-            <span>Model</span>
-            <select value={model} onChange={(event) => setModel(event.target.value)}>
-              {models.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Dataset</span>
-            <input value={dataPath} onChange={(event) => setDataPath(event.target.value)} />
-          </label>
-          <label className="field">
-            <span>Adapter</span>
-            <input value={adapterName} onChange={(event) => setAdapterName(event.target.value)} />
-          </label>
-          <div className="form-grid">
+        <div className="panel-stack">
+          <section className="panel form-panel">
+            <div className="block-heading">
+              <FileText size={18} />
+              <strong>Synthetic dataset</strong>
+            </div>
             <label className="field">
-              <span>Iterations</span>
+              <span>Topic</span>
               <input
-                min={1}
-                type="number"
-                value={iters}
-                onChange={(event) => setIters(Number(event.target.value))}
+                value={syntheticTopic}
+                onChange={(event) => setSyntheticTopic(event.target.value)}
               />
             </label>
             <label className="field">
-              <span>Batch</span>
+              <span>Output folder</span>
               <input
-                min={1}
-                type="number"
-                value={batchSize}
-                onChange={(event) => setBatchSize(Number(event.target.value))}
+                value={syntheticOutput}
+                onChange={(event) => setSyntheticOutput(event.target.value)}
               />
             </label>
-          </div>
-          <button className="primary" disabled={isSubmitting || !model} onClick={startTune}>
-            {isSubmitting ? "Validating" : "Create Job"}
-          </button>
-        </section>
+            <div className="form-grid">
+              <label className="field">
+                <span>Format</span>
+                <select
+                  value={syntheticFormat}
+                  onChange={(event) => setSyntheticFormat(event.target.value as SyntheticFormat)}
+                >
+                  <option value="chat">Chat messages</option>
+                  <option value="completion">Prompt completion</option>
+                  <option value="text">Plain text</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Examples</span>
+                <input
+                  min={1}
+                  max={500}
+                  type="number"
+                  value={syntheticExamples}
+                  onChange={(event) => setSyntheticExamples(Number(event.target.value))}
+                />
+              </label>
+            </div>
+            <button
+              className="secondary"
+              disabled={isGeneratingData || !syntheticTopic.trim()}
+              onClick={generateSyntheticData}
+            >
+              {isGeneratingData ? "Generating" : "Generate Dataset"}
+            </button>
+          </section>
+
+          <section className="panel form-panel">
+            <div className="block-heading">
+              <SlidersHorizontal size={18} />
+              <strong>Fine-tune job</strong>
+            </div>
+            <label className="field">
+              <span>Model</span>
+              <select value={model} onChange={(event) => setModel(event.target.value)}>
+                {models.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Dataset</span>
+              <input value={dataPath} onChange={(event) => setDataPath(event.target.value)} />
+            </label>
+            <label className="field">
+              <span>Adapter</span>
+              <input value={adapterName} onChange={(event) => setAdapterName(event.target.value)} />
+            </label>
+            <div className="form-grid">
+              <label className="field">
+                <span>Iterations</span>
+                <input
+                  min={1}
+                  type="number"
+                  value={iters}
+                  onChange={(event) => setIters(Number(event.target.value))}
+                />
+              </label>
+              <label className="field">
+                <span>Batch</span>
+                <input
+                  min={1}
+                  type="number"
+                  value={batchSize}
+                  onChange={(event) => setBatchSize(Number(event.target.value))}
+                />
+              </label>
+            </div>
+            <button className="primary" disabled={isSubmitting || !model} onClick={startTune}>
+              {isSubmitting ? "Validating" : "Create Job"}
+            </button>
+          </section>
+        </div>
 
         <section className="panel result-panel">
+          {syntheticResult && (
+            <div className="result-block">
+              <div className="block-heading">
+                <FileText size={18} />
+                <strong>Synthetic data</strong>
+              </div>
+              <dl className="details-list">
+                <div>
+                  <dt>Examples</dt>
+                  <dd>{syntheticResult.examples}</dd>
+                </div>
+                <div>
+                  <dt>Format</dt>
+                  <dd>{syntheticResult.format}</dd>
+                </div>
+                <div>
+                  <dt>Path</dt>
+                  <dd>{syntheticResult.train_path}</dd>
+                </div>
+              </dl>
+            </div>
+          )}
           {job ? (
             <>
               <div className="block-heading">

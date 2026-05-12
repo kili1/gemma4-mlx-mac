@@ -600,6 +600,18 @@ select {
   gap: 12px;
 }
 
+.panel-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.result-block {
+  display: grid;
+  gap: 12px;
+  border-bottom: 1px solid #dbe5e1;
+  padding-bottom: 14px;
+}
+
 .form-grid,
 .stats-grid {
   display: grid;

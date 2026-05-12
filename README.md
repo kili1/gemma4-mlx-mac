@@ -124,6 +124,7 @@ The backend exposes:
 - `POST /v1/chat/completions`
 - `POST /api/tunes`
 - `GET /api/tunes/{id}`
+- `POST /api/datasets/synthetic`
 - `GET /api/adapters`
 - `POST /api/adapters/{id}/activate`
 
@@ -157,6 +158,8 @@ Streaming responses are Server-Sent Events. Each chunk includes an OpenAI-style 
 ## Fine-Tuning
 
 V1 focuses on text LoRA/QLoRA. The current UI and API validate datasets and create starter jobs; MLX training execution will run behind the same job interface.
+
+The Fine-tune tab can also create a local synthetic starter dataset. Choose a topic, example count, format, and output folder; the app writes a valid `train.jsonl` and fills the dataset path for the fine-tune job form.
 
 Supported JSONL shapes:
 

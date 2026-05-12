@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import AdapterRegistry
+from .datasets import SyntheticDatasetRequest, create_synthetic_dataset
 from .downloads import ModelDownloadJobStore, ModelDownloadRequest, get_cached_model_path
 from .inference import (
     ChatCompletionRequest,
@@ -202,6 +203,15 @@ def get_tune(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail="Tune job not found.")
     return job.model_dump(mode="json")
+
+
+@router.post("/api/datasets/synthetic")
+def create_synthetic_data(request: SyntheticDatasetRequest) -> dict:
+    try:
+        result = create_synthetic_dataset(request)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.model_dump(mode="json")
 
 
 @router.post("/api/adapters/{adapter_id}/activate")

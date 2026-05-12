@@ -206,6 +206,24 @@ def test_tune_job_route_validates_dataset() -> None:
     assert response.json()["status"] == "queued"
 
 
+def test_synthetic_dataset_route_creates_data(tmp_path) -> None:
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/datasets/synthetic",
+        json={
+            "topic": "MLX local chat",
+            "examples": 2,
+            "output_dir": str(tmp_path / "synthetic"),
+            "format": "completion",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["examples"] == 2
+    assert response.json()["report"]["files"][0]["format"] == "completion"
+
+
 def test_adapters_route_lists_registry() -> None:
     client = TestClient(create_app())
 
