@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model and memory
+      placeholder: MacBook Pro M3 Max, 64 GB
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include commands, model id, dataset shape, and logs.
+    validations:
+      required: true
