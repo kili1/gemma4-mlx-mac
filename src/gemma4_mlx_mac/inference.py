@@ -50,6 +50,16 @@ class LoadedChatModel:
     path: str
 
 
+@dataclass(frozen=True)
+class GeneratedToken:
+    text: str
+    prompt_tokens: int
+    completion_tokens: int
+    elapsed_seconds: float
+    tokens_per_second: float
+    finish_reason: str | None = None
+
+
 ModelLoader = Callable[[str], tuple[Any, Any]]
 StreamGenerator = Callable[..., Iterable[Any]]
 SamplerFactory = Callable[[float], Callable[..., Any]]
@@ -72,27 +82,20 @@ class ChatService:
         self._lock = RLock()
 
     def create_completion(self, request: ChatCompletionRequest) -> dict:
-        if request.stream:
-            raise InferenceNotReady(
-                "Streaming HTTP responses are not enabled yet. Send requests with stream=false."
-            )
-
-        loaded = self._load_model(request.model)
-        prompt = _render_prompt(loaded.tokenizer, request.messages)
         text_parts: list[str] = []
         prompt_tokens = 0
         completion_tokens = 0
         finish_reason = "stop"
 
         try:
-            for chunk in self._stream_completion(loaded, prompt, request):
-                text_parts.append(str(getattr(chunk, "text", chunk)))
-                prompt_tokens = int(getattr(chunk, "prompt_tokens", prompt_tokens) or 0)
-                completion_tokens = int(
-                    getattr(chunk, "generation_tokens", completion_tokens) or 0
-                )
-                finish_reason = getattr(chunk, "finish_reason", None) or finish_reason
+            for chunk in self.stream_tokens(request):
+                text_parts.append(chunk.text)
+                prompt_tokens = chunk.prompt_tokens
+                completion_tokens = chunk.completion_tokens
+                finish_reason = chunk.finish_reason or finish_reason
         except InferenceNotReady:
+            raise
+        except InferenceError:
             raise
         except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
             raise InferenceError(f"MLX generation failed: {exc}") from exc
@@ -116,6 +119,36 @@ class ChatService:
                 "total_tokens": prompt_tokens + completion_tokens,
             },
         }
+
+    def stream_tokens(self, request: ChatCompletionRequest) -> Iterable[GeneratedToken]:
+        loaded = self._load_model(request.model)
+        prompt = _render_prompt(loaded.tokenizer, request.messages)
+        started_at = time.monotonic()
+        completion_tokens = 0
+        prompt_tokens = 0
+
+        try:
+            for raw_chunk in self._stream_completion(loaded, prompt, request):
+                text = str(getattr(raw_chunk, "text", raw_chunk))
+                prompt_tokens = int(getattr(raw_chunk, "prompt_tokens", prompt_tokens) or 0)
+                reported_tokens = int(getattr(raw_chunk, "generation_tokens", 0) or 0)
+                if reported_tokens > completion_tokens:
+                    completion_tokens = reported_tokens
+                elif text:
+                    completion_tokens += 1
+                elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
+                yield GeneratedToken(
+                    text=text,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    elapsed_seconds=elapsed_seconds,
+                    tokens_per_second=completion_tokens / elapsed_seconds,
+                    finish_reason=getattr(raw_chunk, "finish_reason", None),
+                )
+        except InferenceNotReady:
+            raise
+        except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
+            raise InferenceError(f"MLX generation failed: {exc}") from exc
 
     def _load_model(self, model_id: str) -> LoadedChatModel:
         with self._lock:

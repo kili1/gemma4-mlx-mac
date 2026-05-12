@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from gemma4_mlx_mac import api
 from gemma4_mlx_mac.app import create_app
 from gemma4_mlx_mac.downloads import ModelDownloader, ModelDownloadJobStore
+from gemma4_mlx_mac.inference import GeneratedToken
 from gemma4_mlx_mac.mlx_setup import MlxInstallJob, MlxStatus
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 
@@ -145,6 +146,47 @@ def test_chat_route_shape_returns_completion(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "hello back"
+
+
+def test_chat_route_streams_tokens_and_metrics(monkeypatch) -> None:
+    class FakeChatService:
+        def stream_tokens(self, request):
+            assert request.stream is True
+            yield GeneratedToken(
+                text="hello",
+                prompt_tokens=3,
+                completion_tokens=1,
+                elapsed_seconds=0.5,
+                tokens_per_second=2.0,
+            )
+            yield GeneratedToken(
+                text=" back",
+                prompt_tokens=3,
+                completion_tokens=2,
+                elapsed_seconds=1.0,
+                tokens_per_second=2.0,
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(api, "chat_service", FakeChatService())
+    client = TestClient(create_app())
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": DEFAULT_MODEL_ID,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        },
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    assert "hello" in body
+    assert '"completion_tokens": 2' in body
+    assert '"tokens_per_second": 2.0' in body
+    assert "data: [DONE]" in body
 
 
 def test_tune_job_route_validates_dataset() -> None:

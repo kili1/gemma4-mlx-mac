@@ -221,9 +221,36 @@ h2 {
   max-width: 760px;
 }
 
-.message span {
+.message > span,
+.message-meta > span {
   color: #65736e;
   font-size: 0.82rem;
+}
+
+.message-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.generation-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.generation-stats span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid #b9d9c8;
+  border-radius: 999px;
+  background: #edf8f2;
+  color: #17633f;
+  padding: 0 8px;
+  font-size: 0.78rem;
 }
 
 .message p,

@@ -71,6 +71,33 @@ def test_chat_service_uses_mlx_stream_generate_shape() -> None:
     assert response["usage"]["completion_tokens"] == 2
 
 
+def test_chat_service_streams_token_metrics() -> None:
+    def fake_stream_generate(*_args, **_kwargs):
+        yield SimpleNamespace(text="hi", prompt_tokens=2, generation_tokens=1)
+        yield SimpleNamespace(text=" there", prompt_tokens=2, generation_tokens=2)
+
+    service = ChatService(
+        model_loader=lambda _model_path: (object(), FakeTokenizer()),
+        stream_generator=fake_stream_generate,
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _model_id: "/tmp/gemma",
+    )
+
+    chunks = list(
+        service.stream_tokens(
+            ChatCompletionRequest(
+                model=DEFAULT_MODEL_ID,
+                messages=[ChatMessage(role="user", content="hello")],
+                max_tokens=2,
+            )
+        )
+    )
+
+    assert [chunk.text for chunk in chunks] == ["hi", " there"]
+    assert chunks[-1].completion_tokens == 2
+    assert chunks[-1].tokens_per_second > 0
+
+
 def test_default_loader_falls_back_for_unused_gemma4_weights(monkeypatch) -> None:
     def strict_loader(model_path: str):
         assert model_path == "/tmp/gemma"

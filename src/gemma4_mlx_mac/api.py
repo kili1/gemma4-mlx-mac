@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
+import time
+from collections.abc import Iterable
+
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .adapters import AdapterRegistry
 from .downloads import ModelDownloadJobStore, ModelDownloadRequest, get_cached_model_path
-from .inference import ChatCompletionRequest, ChatService, InferenceError, InferenceNotReady
+from .inference import (
+    ChatCompletionRequest,
+    ChatService,
+    GeneratedToken,
+    InferenceError,
+    InferenceNotReady,
+)
 from .mlx_setup import MlxInstallerJobStore
 from .models import ModelProfile, list_model_profiles
 from .system import collect_system_info
@@ -85,7 +95,14 @@ def get_inference_install(job_id: str) -> dict:
 
 
 @router.post("/v1/chat/completions")
-def create_chat_completion(request: ChatCompletionRequest) -> JSONResponse:
+def create_chat_completion(request: ChatCompletionRequest):
+    if request.stream:
+        return StreamingResponse(
+            _stream_chat_completion(request),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     try:
         return JSONResponse(chat_service.create_completion(request))
     except InferenceNotReady as exc:
@@ -108,6 +125,66 @@ def create_chat_completion(request: ChatCompletionRequest) -> JSONResponse:
                 }
             },
         )
+
+
+def _stream_chat_completion(request: ChatCompletionRequest) -> Iterable[str]:
+    completion_id = f"chatcmpl-stream-{int(time.time() * 1000)}"
+    created = int(time.time())
+    last_chunk: GeneratedToken | None = None
+    try:
+        for chunk in chat_service.stream_tokens(request):
+            last_chunk = chunk
+            yield _sse(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": chunk.text},
+                            "finish_reason": None,
+                        }
+                    ],
+                    "metrics": _generation_metrics(chunk),
+                }
+            )
+        yield _sse(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": (last_chunk.finish_reason if last_chunk else None)
+                        or "stop",
+                    }
+                ],
+                "metrics": _generation_metrics(last_chunk) if last_chunk else None,
+            }
+        )
+    except InferenceNotReady as exc:
+        yield _sse({"error": {"type": "not_ready", "message": str(exc)}})
+    except InferenceError as exc:
+        yield _sse({"error": {"type": "inference_error", "message": str(exc)}})
+    yield "data: [DONE]\n\n"
+
+
+def _generation_metrics(chunk: GeneratedToken) -> dict:
+    return {
+        "prompt_tokens": chunk.prompt_tokens,
+        "completion_tokens": chunk.completion_tokens,
+        "elapsed_seconds": round(chunk.elapsed_seconds, 3),
+        "tokens_per_second": round(chunk.tokens_per_second, 2),
+    }
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @router.post("/api/tunes")

@@ -106,6 +106,26 @@ type AdapterInfo = {
   path: string;
   active: boolean;
 };
+type GenerationStats = {
+  completionTokens: number;
+  tokensPerSecond: number;
+  elapsedSeconds: number;
+};
+type ChatStreamPayload = {
+  choices?: Array<{
+    delta?: { content?: string };
+    finish_reason?: string | null;
+  }>;
+  metrics?: {
+    completion_tokens?: number;
+    tokens_per_second?: number;
+    elapsed_seconds?: number;
+  } | null;
+  error?: {
+    type: string;
+    message: string;
+  };
+};
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
@@ -215,6 +235,7 @@ function ChatPanel() {
   const [lastPrompt, setLastPrompt] = React.useState("");
   const [message, setMessage] = React.useState("");
   const [reply, setReply] = React.useState("");
+  const [generationStats, setGenerationStats] = React.useState<GenerationStats | null>(null);
   const [isSending, setIsSending] = React.useState(false);
   const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus | null>(null);
   const [installJob, setInstallJob] = React.useState<MlxInstallJob | null>(null);
@@ -362,20 +383,49 @@ function ChatPanel() {
     setMessage("");
     setReply("");
     setLastPrompt(content);
+    setGenerationStats({ completionTokens: 0, tokensPerSecond: 0, elapsedSeconds: 0 });
     try {
       const response = await fetch("/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: activeModel,
-          messages: [{ role: "user", content }]
+          messages: [{ role: "user", content }],
+          stream: true
         })
       });
-      const data = await response.json();
       if (!response.ok) {
+        const data = await response.json();
         throw new Error(data.error?.message ?? data.detail ?? "Chat request failed.");
       }
-      setReply(data.choices?.[0]?.message?.content ?? JSON.stringify(data, null, 2));
+
+      if (!response.body) {
+        const data = await response.json();
+        setReply(data.choices?.[0]?.message?.content ?? JSON.stringify(data, null, 2));
+        return;
+      }
+
+      let generatedText = "";
+      let fallbackTokens = 0;
+      const startedAt = performance.now();
+      await readChatStream(response, (payload) => {
+        if (payload.error) {
+          throw new Error(payload.error.message);
+        }
+        const delta = payload.choices?.[0]?.delta?.content ?? "";
+        if (delta) {
+          generatedText += delta;
+          fallbackTokens += 1;
+          setReply(generatedText);
+        }
+        const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+        const completionTokens = payload.metrics?.completion_tokens ?? fallbackTokens;
+        setGenerationStats({
+          completionTokens,
+          tokensPerSecond: payload.metrics?.tokens_per_second ?? completionTokens / elapsedSeconds,
+          elapsedSeconds: payload.metrics?.elapsed_seconds ?? elapsedSeconds
+        });
+      });
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Chat request failed.");
     } finally {
@@ -407,16 +457,18 @@ function ChatPanel() {
                 <p>{lastPrompt}</p>
               </article>
             )}
-            {reply && (
+            {(reply || isSending) && (
               <article className="message assistant-message">
-                <span>Gemma</span>
-                <pre>{reply}</pre>
-              </article>
-            )}
-            {isSending && (
-              <article className="message assistant-message pending">
-                <span>Gemma</span>
-                <p>Generating</p>
+                <div className="message-meta">
+                  <span>Gemma</span>
+                  {generationStats && (
+                    <div className="generation-stats">
+                      <span>{generationStats.completionTokens} tokens</span>
+                      <span>{formatTokensPerSecond(generationStats.tokensPerSecond)} tok/s</span>
+                    </div>
+                  )}
+                </div>
+                {reply ? <pre>{reply}</pre> : <p>Waiting for first token</p>}
               </article>
             )}
           </div>
@@ -982,6 +1034,48 @@ function countDatasetExamples(dataset: TuneJob["dataset"]) {
   return dataset.files.reduce((total, file) => total + file.examples, 0);
 }
 
+async function readChatStream(
+  response: Response,
+  onPayload: (payload: ChatStreamPayload) => void,
+) {
+  if (!response.body) {
+    throw new Error("Chat response did not include a stream.");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const event of events) {
+      handleStreamEvent(event, onPayload);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    handleStreamEvent(buffer, onPayload);
+  }
+}
+
+function handleStreamEvent(event: string, onPayload: (payload: ChatStreamPayload) => void) {
+  const data = event
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
+  if (!data || data === "[DONE]") {
+    return;
+  }
+  onPayload(JSON.parse(data));
+}
+
 function formatBytes(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -998,6 +1092,13 @@ function formatBytes(bytes: number) {
 
 function formatCommand(command: string[]) {
   return command.map((part) => (/\s/.test(part) ? `"${part}"` : part)).join(" ");
+}
+
+function formatTokensPerSecond(value: number) {
+  if (!Number.isFinite(value)) {
+    return "0.0";
+  }
+  return value.toFixed(value >= 10 ? 1 : 2);
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
