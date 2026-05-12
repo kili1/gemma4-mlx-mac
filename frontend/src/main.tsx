@@ -95,7 +95,7 @@ type SystemInfo = {
 };
 type TuneJob = {
   id: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  status: "queued" | "running" | "ready" | "succeeded" | "failed" | "cancelled";
   request: {
     model: string;
     data_path: string;
@@ -113,6 +113,13 @@ type TuneJob = {
       examples: number;
     }>;
   };
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  progress_percent: number;
+  current_step: string;
+  logs: string[];
   message: string;
 };
 type SyntheticFormat = "chat" | "completion" | "text";
@@ -894,10 +901,29 @@ function TunePanel() {
         throw new Error(data.detail ?? "Fine-tune job failed.");
       }
       setJob(data);
+      if (isTuneActive(data.status)) {
+        pollTune(data.id);
+      }
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Fine-tune job failed.");
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function pollTune(jobId: string) {
+    try {
+      const response = await fetch(`/api/tunes/${jobId}`);
+      const data: TuneJob = await response.json();
+      if (!response.ok) {
+        throw new Error((data as unknown as { detail?: string }).detail ?? "Could not read job.");
+      }
+      setJob(data);
+      if (isTuneActive(data.status)) {
+        window.setTimeout(() => pollTune(jobId), 800);
+      }
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Could not read fine-tune progress.");
     }
   }
 
@@ -936,7 +962,7 @@ function TunePanel() {
   return (
     <>
       <PageHeader title="Fine-tune" eyebrow="LoRA jobs">
-        <StatusBadge tone={job ? "good" : "neutral"}>{job?.status ?? "idle"}</StatusBadge>
+        <StatusBadge tone={tuneStatusTone(job?.status)}>{job?.status ?? "idle"}</StatusBadge>
       </PageHeader>
       {message && <p className="notice">{message}</p>}
       <div className="two-column">
@@ -1070,6 +1096,7 @@ function TunePanel() {
                 <Terminal size={18} />
                 <strong>{job.id}</strong>
               </div>
+              <TuneProgress job={job} />
               <dl className="details-list">
                 <div>
                   <dt>Examples</dt>
@@ -1095,6 +1122,34 @@ function TunePanel() {
         </section>
       </div>
     </>
+  );
+}
+
+function TuneProgress({ job }: { job: TuneJob }) {
+  const percent = clampProgress(job.progress_percent);
+  const recentLogs = job.logs.slice(-6);
+
+  return (
+    <div className="tune-progress" aria-label={`Fine-tune progress for ${job.id}`}>
+      <div className="progress-meta">
+        <span>{job.current_step}</span>
+        <span>{percent}%</span>
+      </div>
+      <div className="progress-track">
+        <div className="progress-fill" style={{ width: `${percent}%` }} />
+      </div>
+      <p>{job.message}</p>
+      {recentLogs.length > 0 && (
+        <div className="job-log">
+          <strong>Activity</strong>
+          <ol>
+            {recentLogs.map((entry, index) => (
+              <li key={`${entry}-${index}`}>{entry}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1245,6 +1300,30 @@ function progressDetails(job: DownloadJob) {
 
 function countDatasetExamples(dataset: TuneJob["dataset"]) {
   return dataset.files.reduce((total, file) => total + file.examples, 0);
+}
+
+function isTuneActive(status: TuneJob["status"]) {
+  return status === "queued" || status === "running";
+}
+
+function tuneStatusTone(status: TuneJob["status"] | undefined): "neutral" | "good" | "warn" | "bad" {
+  if (status === "failed" || status === "cancelled") {
+    return "bad";
+  }
+  if (status === "running" || status === "queued") {
+    return "warn";
+  }
+  if (status === "ready" || status === "succeeded") {
+    return "good";
+  }
+  return "neutral";
+}
+
+function clampProgress(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, Math.round(value)));
 }
 
 async function readChatStream(

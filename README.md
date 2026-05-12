@@ -165,6 +165,8 @@ V1 focuses on text LoRA/QLoRA. The current UI and API validate datasets and crea
 
 The Fine-tune tab can also create a local synthetic starter dataset. Choose a topic, example count, format, and output folder; the app writes a valid `train.jsonl` and fills the dataset path for the fine-tune job form.
 
+When you create a fine-tune job, the UI now polls `GET /api/tunes/{id}` and shows the job status, progress bar, current step, and recent activity log. In this starter release, `ready` means the dataset and job metadata are prepared for the MLX trainer; the actual weight-changing training execution is still being wired.
+
 Supported JSONL shapes:
 
 ```jsonl

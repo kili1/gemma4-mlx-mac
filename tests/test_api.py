@@ -8,6 +8,7 @@ from gemma4_mlx_mac.downloads import ModelDownloader, ModelDownloadJobStore
 from gemma4_mlx_mac.inference import GeneratedToken
 from gemma4_mlx_mac.mlx_setup import MlxInstallJob, MlxStatus
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
+from gemma4_mlx_mac.tuning import TuneJobStore
 
 
 def test_health_system_and_models_routes() -> None:
@@ -192,7 +193,8 @@ def test_chat_route_streams_tokens_and_metrics(monkeypatch) -> None:
     assert "data: [DONE]" in body
 
 
-def test_tune_job_route_validates_dataset() -> None:
+def test_tune_job_route_validates_dataset(monkeypatch) -> None:
+    monkeypatch.setattr(api, "tune_jobs", TuneJobStore(step_delay=0))
     client = TestClient(create_app())
 
     response = client.post(
@@ -206,7 +208,21 @@ def test_tune_job_route_validates_dataset() -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "queued"
+    assert response.json()["status"] in {"queued", "running", "ready"}
+    assert response.json()["progress_percent"] >= 5
+    assert response.json()["current_step"]
+
+    job_id = response.json()["id"]
+    for _ in range(10):
+        job_response = client.get(f"/api/tunes/{job_id}")
+        if job_response.json()["status"] == "ready":
+            break
+        sleep(0.01)
+
+    assert job_response.status_code == 200
+    assert job_response.json()["progress_percent"] == 100
+    assert "MLX training execution is not wired yet" in job_response.json()["message"]
+    assert job_response.json()["logs"]
 
 
 def test_synthetic_dataset_route_creates_data(tmp_path) -> None:

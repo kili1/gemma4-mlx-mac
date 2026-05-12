@@ -26,7 +26,9 @@ gemma4-mlx-mac tune start \
   --iters 100
 ```
 
-The starter validates dataset shape and records a job. The MLX execution layer will map this into `mlx_lm.lora` with LoRA/QLoRA defaults.
+The starter validates dataset shape and records a job. The web UI polls `GET /api/tunes/{id}` to show status, progress percent, current step, and recent activity logs.
+
+`ready` means the dataset and job metadata are prepared for the MLX trainer. The MLX execution layer will map this into `mlx_lm.lora` with LoRA/QLoRA defaults; until that runner is wired, no model weights are changed.
 
 ## Memory Notes
 
