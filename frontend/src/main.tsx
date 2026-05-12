@@ -413,6 +413,7 @@ function ChatPanel() {
     setMessage("");
     setReply("");
     setLastPrompt(content);
+    setPrompt("");
     setGenerationStats({ completionTokens: 0, tokensPerSecond: 0, elapsedSeconds: 0 });
     try {
       const response = await fetch("/v1/chat/completions", {
