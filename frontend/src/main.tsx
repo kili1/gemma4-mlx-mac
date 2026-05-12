@@ -25,6 +25,8 @@ type DownloadJob = {
   message: string;
 };
 
+const defaultModelId = "mlx-community/gemma-4-e2b-it-4bit";
+
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
   { id: "models", label: "Models", icon: <Database size={18} /> },
@@ -68,13 +70,7 @@ function App() {
 function renderView(view: View) {
   switch (view) {
     case "chat":
-      return (
-        <>
-          <h2>Chat</h2>
-          <textarea placeholder="Ask Gemma 4 something..." />
-          <button className="primary">Send</button>
-        </>
-      );
+      return <ChatPanel />;
     case "models":
       return <ModelsPanel />;
     case "tune":
@@ -100,6 +96,109 @@ function renderView(view: View) {
         </>
       );
   }
+}
+
+function ChatPanel() {
+  const [models, setModels] = React.useState<ModelProfile[]>([]);
+  const [selectedModel, setSelectedModel] = React.useState(defaultModelId);
+  const [prompt, setPrompt] = React.useState("");
+  const [message, setMessage] = React.useState("");
+  const [reply, setReply] = React.useState("");
+  const [isSending, setIsSending] = React.useState(false);
+
+  React.useEffect(() => {
+    fetch("/api/models")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Could not load models.");
+        }
+        return response.json();
+      })
+      .then((data: { models: ModelProfile[] }) => {
+        setModels(data.models);
+        const defaultModel = data.models.find((model) => model.default) ?? data.models[0];
+        if (defaultModel) {
+          setSelectedModel(defaultModel.id);
+        }
+      })
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : "Could not load models.");
+      });
+  }, []);
+
+  async function sendPrompt() {
+    const content = prompt.trim();
+    if (!content) {
+      setMessage("Enter a prompt first.");
+      return;
+    }
+
+    setIsSending(true);
+    setMessage("");
+    setReply("");
+    try {
+      const response = await fetch("/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: selectedModel,
+          messages: [{ role: "user", content }]
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error?.message ?? data.detail ?? "Chat request failed.");
+      }
+      setReply(data.choices?.[0]?.message?.content ?? JSON.stringify(data, null, 2));
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Chat request failed.");
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="chat-header">
+        <h2>Chat</h2>
+        <label className="field">
+          <span>Model</span>
+          <select
+            value={selectedModel}
+            onChange={(event) => setSelectedModel(event.target.value)}
+            disabled={models.length === 0 || isSending}
+          >
+            {models.length === 0 ? (
+              <option value={selectedModel}>{selectedModel}</option>
+            ) : (
+              models.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))
+            )}
+          </select>
+        </label>
+      </div>
+      {message && <p className="notice">{message}</p>}
+      <textarea
+        value={prompt}
+        onChange={(event) => setPrompt(event.target.value)}
+        placeholder="Ask Gemma 4 something..."
+      />
+      <div className="chat-actions">
+        <span>{selectedModel}</span>
+        <button className="primary" disabled={isSending} onClick={sendPrompt}>
+          {isSending ? "Sending" : "Send"}
+        </button>
+      </div>
+      {reply && (
+        <section className="response-panel" aria-label="Assistant response">
+          <pre>{reply}</pre>
+        </section>
+      )}
+    </>
+  );
 }
 
 function ModelsPanel() {
