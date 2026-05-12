@@ -1,9 +1,16 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Activity, Bot, Cpu, Database, SlidersHorizontal } from "lucide-react";
+import { Activity, Bot, Cpu, Database, Download, SlidersHorizontal } from "lucide-react";
 import "./styles.css";
 
 type View = "chat" | "models" | "tune" | "adapters" | "system";
+type ModelProfile = {
+  id: string;
+  label: string;
+  recommended_memory_gb: number;
+  default: boolean;
+  notes: string;
+};
 
 const views: Array<{ id: View; label: string; icon: React.ReactNode }> = [
   { id: "chat", label: "Chat", icon: <Bot size={18} /> },
@@ -56,12 +63,7 @@ function renderView(view: View) {
         </>
       );
     case "models":
-      return (
-        <>
-          <h2>Models</h2>
-          <p>Default: mlx-community/gemma-4-e2b-it-4bit</p>
-        </>
-      );
+      return <ModelsPanel />;
     case "tune":
       return (
         <>
@@ -85,6 +87,78 @@ function renderView(view: View) {
         </>
       );
   }
+}
+
+function ModelsPanel() {
+  const [models, setModels] = React.useState<ModelProfile[]>([]);
+  const [loadingModel, setLoadingModel] = React.useState<string | null>(null);
+  const [message, setMessage] = React.useState<string>("Loading model profiles...");
+
+  React.useEffect(() => {
+    fetch("/api/models")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Could not load models.");
+        }
+        return response.json();
+      })
+      .then((data: { models: ModelProfile[] }) => {
+        setModels(data.models);
+        setMessage("");
+      })
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : "Could not load models.");
+      });
+  }, []);
+
+  async function downloadModel(model: string) {
+    setLoadingModel(model);
+    setMessage(`Downloading ${model}...`);
+    try {
+      const response = await fetch("/api/models/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Download failed.");
+      }
+      setMessage(`Downloaded to ${data.path}`);
+    } catch (error: unknown) {
+      setMessage(error instanceof Error ? error.message : "Download failed.");
+    } finally {
+      setLoadingModel(null);
+    }
+  }
+
+  return (
+    <>
+      <h2>Models</h2>
+      {message && <p className="notice">{message}</p>}
+      <div className="model-list">
+        {models.map((model) => (
+          <div className="model-row" key={model.id}>
+            <div>
+              <strong>{model.label}</strong>
+              <p>{model.id}</p>
+              <span>{model.recommended_memory_gb} GB recommended</span>
+              {model.default && <span>Default</span>}
+            </div>
+            <button
+              className="secondary"
+              disabled={loadingModel !== null}
+              onClick={() => downloadModel(model.id)}
+              title={`Download ${model.label}`}
+            >
+              <Download size={18} />
+              <span>{loadingModel === model.id ? "Downloading" : "Download"}</span>
+            </button>
+          </div>
+        ))}
+      </div>
+    </>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

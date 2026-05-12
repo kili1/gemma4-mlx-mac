@@ -11,6 +11,7 @@ from rich.table import Table
 
 from .adapters import AdapterRegistry
 from .datasets import validate_dataset_dir
+from .downloads import ModelDownloader, ModelDownloadError, ModelDownloadRequest
 from .models import DEFAULT_MODEL_ID, list_model_profiles
 from .system import collect_system_info
 from .tuning import TuneJobStore, TuneRequest
@@ -91,6 +92,35 @@ def models_cmd() -> None:
             profile.notes,
         )
     console.print(table)
+
+
+@app.command("download")
+def download_cmd(
+    model: str = typer.Option(DEFAULT_MODEL_ID, help="Hugging Face model id to download."),
+    revision: str | None = typer.Option(None, help="Optional Hugging Face revision."),
+    cache_dir: Path | None = typer.Option(None, help="Optional Hugging Face cache directory."),
+    local_dir: Path | None = typer.Option(None, help="Optional target directory."),
+    token: str | None = typer.Option(None, help="Optional Hugging Face access token."),
+    force: bool = typer.Option(False, "--force", help="Force a fresh download."),
+) -> None:
+    """Download a model snapshot from Hugging Face."""
+    request = ModelDownloadRequest(
+        model=model,
+        revision=revision,
+        cache_dir=str(cache_dir) if cache_dir else None,
+        local_dir=str(local_dir) if local_dir else None,
+        token=token,
+        force_download=force,
+    )
+    try:
+        result = ModelDownloader().download(request)
+    except ModelDownloadError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(f"Downloaded {result.model}")
+    console.print(f"Path: {result.path}")
+    console.print(f"Files: {result.files}")
 
 
 @app.command("adapters")

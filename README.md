@@ -47,6 +47,19 @@ List the built-in model profiles:
 gemma4-mlx-mac models
 ```
 
+Download the default Gemma 4 MLX model snapshot from Hugging Face:
+
+```bash
+gemma4-mlx-mac download
+```
+
+For gated models, authenticate first:
+
+```bash
+huggingface-cli login
+gemma4-mlx-mac download --model mlx-community/gemma-4-e2b-it-4bit
+```
+
 ## MLX Dependencies
 
 The base package intentionally keeps CI and docs lightweight. On Apple Silicon, install the MLX extras before running real local inference or fine-tuning:
@@ -66,6 +79,7 @@ The backend exposes:
 
 - `GET /api/system`
 - `GET /api/models`
+- `POST /api/models/download`
 - `POST /v1/chat/completions`
 - `POST /api/tunes`
 - `GET /api/tunes/{id}`

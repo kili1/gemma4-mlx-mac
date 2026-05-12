@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
+from gemma4_mlx_mac import api
 from gemma4_mlx_mac.app import create_app
+from gemma4_mlx_mac.downloads import ModelDownloader
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 
 
@@ -13,6 +15,24 @@ def test_health_system_and_models_routes() -> None:
     assert system_response.status_code == 200
     assert models_response.status_code == 200
     assert models_response.json()["models"][0]["id"] == DEFAULT_MODEL_ID
+
+
+def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -> None:
+    model_dir = tmp_path / "snapshot"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    def fake_snapshot_download(**kwargs: object) -> str:
+        assert kwargs["repo_id"] == DEFAULT_MODEL_ID
+        return str(model_dir)
+
+    monkeypatch.setattr(api, "model_downloader", ModelDownloader(fake_snapshot_download))
+    client = TestClient(create_app())
+
+    response = client.post("/api/models/download", json={"model": DEFAULT_MODEL_ID})
+
+    assert response.status_code == 200
+    assert response.json()["path"] == str(model_dir)
 
 
 def test_frontend_shell_is_served() -> None:

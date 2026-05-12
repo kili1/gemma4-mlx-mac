@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from .adapters import AdapterRegistry
+from .downloads import ModelDownloader, ModelDownloadError, ModelDownloadRequest
 from .inference import ChatCompletionRequest, ChatService, InferenceNotReady
 from .models import list_model_profiles
 from .system import collect_system_info
@@ -13,6 +14,7 @@ router = APIRouter()
 chat_service = ChatService()
 tune_jobs = TuneJobStore()
 adapters = AdapterRegistry()
+model_downloader = ModelDownloader()
 
 
 @router.get("/api/system")
@@ -23,6 +25,15 @@ def get_system() -> dict:
 @router.get("/api/models")
 def get_models() -> dict:
     return {"models": [profile.model_dump() for profile in list_model_profiles()]}
+
+
+@router.post("/api/models/download")
+def download_model(request: ModelDownloadRequest) -> dict:
+    try:
+        result = model_downloader.download(request)
+    except ModelDownloadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.model_dump()
 
 
 @router.post("/v1/chat/completions")
