@@ -4,19 +4,20 @@ Run, chat with, and fine-tune Gemma 4 locally on Apple Silicon with MLX unified 
 
 `gemma4-mlx-mac` is a local-first Mac app for the Gemma 4 open model family. It includes a Python CLI, FastAPI backend, React frontend, Hugging Face model downloads with progress, MLX dependency setup, OpenAI-compatible chat, and starter LoRA/QLoRA fine-tuning workflows.
 
-> Status: pre-alpha, but usable. Local MLX text inference is wired through `mlx_lm.stream_generate`; training execution is still a starter job interface.
+> Status: alpha. Local MLX text inference (`mlx_lm.stream_generate`), native Gemma 4 Thinking Mode, `mlx_lm lora` fine-tuning, and active LoRA adapter loading are all wired end-to-end.
 
 ## Features
 
 - Local-only operation: no hosted API, no telemetry, and no bundled model weights.
-- Default model profile: `mlx-community/gemma-4-e2b-it-4bit`.
+- Default model profile: `mlx-community/gemma-4-E2B-it-qat-4bit` (QAT 4-bit, ~2.9 GB static / ~3.5 GB peak RAM), plus QAT 4-bit E4B, 12B Unified (256K), 26B-A4B MoE, 31B, and bf16 workstation profiles.
 - One-click MLX install from the Chat tab when `mlx` / `mlx_lm` are missing.
 - Hugging Face model download from the Models tab or CLI, with live progress.
 - Optional download folder selection before starting a model download.
 - Chat model selection from downloaded models, plus direct local snapshot path entry.
+- Native Gemma 4 Thinking Mode (`enable_thinking=True/False` in `apply_chat_template` with `<|channel>thought...<channel|>` stream parsing and multi-turn history stripping).
 - Streaming chat output with live token count and tokens/sec.
 - OpenAI-compatible `/v1/chat/completions` route, including SSE streaming when `stream: true`.
-- Starter Fine-tune, Adapters, Models, Chat, and System views in the frontend.
+- Real `mlx_lm lora` fine-tuning jobs with live loss/progress/peak-memory parsing, cancellation, and active adapter loading in Chat.
 
 ## Quick Start
 
@@ -83,7 +84,7 @@ gemma4-mlx-mac download
 Download a specific model:
 
 ```bash
-gemma4-mlx-mac download --model mlx-community/gemma-4-e2b-it-4bit
+gemma4-mlx-mac download --model mlx-community/gemma-4-12B-it-qat-4bit
 ```
 
 The CLI shows byte/file progress. The web UI also shows download progress and lets you set a target folder such as `~/Models/gemma4` before downloading.
@@ -103,10 +104,11 @@ The Chat tab supports two model sources:
 
 Responses stream token-by-token. The assistant message displays generated token count and tokens/sec as the model runs.
 
-CLI one-shot chat is also available:
+CLI one-shot chat is also available (with optional native Thinking Mode and LoRA adapters):
 
 ```bash
 gemma4-mlx-mac chat "Say hello in one sentence."
+gemma4-mlx-mac chat "Compare MoE vs dense models." --thinking --adapter ./adapters/demo-adapter
 ```
 
 ## API
@@ -122,11 +124,14 @@ The backend exposes:
 - `POST /api/inference/install`
 - `GET /api/inference/install/{job_id}`
 - `POST /v1/chat/completions`
+- `GET /api/tunes`
 - `POST /api/tunes`
 - `GET /api/tunes/{id}`
+- `POST /api/tunes/{id}/cancel`
 - `POST /api/datasets/synthetic`
 - `GET /api/adapters`
 - `POST /api/adapters/{id}/activate`
+- `POST /api/adapters/deactivate`
 
 Non-streaming chat:
 
@@ -155,17 +160,13 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 Streaming responses are Server-Sent Events. Each chunk includes an OpenAI-style `delta.content` plus `metrics.completion_tokens`, `metrics.elapsed_seconds`, and `metrics.tokens_per_second`.
 
-Set `show_thinking: true` in chat requests, or enable Thinking in the Chat tab, to enforce a `Thinking:` plus `Answer:` response shape. Raw `<think>...</think>` blocks are filtered from responses, and if the model ignores the requested visible summary the server wraps the answer with a clear fallback note.
+Set `show_thinking: true` in chat requests, or enable Thinking in the Chat tab, to pass `enable_thinking=True` to Gemma 4's native chat template and stream `<|channel>thought...<channel|>` reasoning formatted as `Thinking:` followed by `Answer:`. When `show_thinking: false`, raw thought channels are stripped automatically, and multi-turn history always strips prior thought blocks.
 
 The Chat and System views include a Model memory card. It reports whether a model is loaded and shows an approximate resident-memory delta since the server started, which is the app's practical view of Apple Silicon unified-memory pressure.
 
 ## Fine-Tuning
 
-V1 focuses on text LoRA/QLoRA. The current UI and API validate datasets and create starter jobs; MLX training execution will run behind the same job interface.
-
-The Fine-tune tab can also create a local synthetic starter dataset. Choose a topic, example count, format, and output folder; the app writes a valid `train.jsonl` and fills the dataset path for the fine-tune job form.
-
-When you create a fine-tune job, the UI now polls `GET /api/tunes/{id}` and shows the job status, progress bar, current step, and recent activity log. In this starter release, `ready` means the dataset and job metadata are prepared for the MLX trainer; the actual weight-changing training execution is still being wired.
+V1 runs real text LoRA/QLoRA fine-tuning via `python -m mlx_lm lora`. The Fine-tune tab validates datasets (or generates synthetic starter JSONL data), launches `mlx_lm lora`, streams live iteration progress, train/val loss, tokens/sec, and peak unified memory via `GET /api/tunes/{id}`, supports cancellation via `POST /api/tunes/{id}/cancel`, and saves adapters under `adapters/<adapter_name>`. Activating an adapter via `POST /api/adapters/{id}/activate` automatically loads it into subsequent Chat requests.
 
 Supported JSONL shapes:
 

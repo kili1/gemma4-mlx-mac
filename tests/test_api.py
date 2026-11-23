@@ -193,8 +193,25 @@ def test_chat_route_streams_tokens_and_metrics(monkeypatch) -> None:
     assert "data: [DONE]" in body
 
 
-def test_tune_job_route_validates_dataset(monkeypatch) -> None:
-    monkeypatch.setattr(api, "tune_jobs", TuneJobStore(step_delay=0))
+def test_tune_job_route_runs_mlx_lora_and_registers_adapter(monkeypatch, tmp_path) -> None:
+    from gemma4_mlx_mac.adapters import AdapterRegistry
+
+    registry = AdapterRegistry(tmp_path / "adapters")
+
+    def fake_runner(_command, on_line, _is_cancelled, _set_process):
+        on_line("Iter 1: Train loss 1.500, Tokens/sec 250.0, Peak mem 3.50 GB")
+        return 0
+
+    monkeypatch.setattr(api, "adapters", registry)
+    monkeypatch.setattr(
+        api,
+        "tune_jobs",
+        TuneJobStore(
+            adapter_registry=registry,
+            command_runner=fake_runner,
+            mlx_checker=lambda: True,
+        ),
+    )
     client = TestClient(create_app())
 
     response = client.post(
@@ -208,21 +225,30 @@ def test_tune_job_route_validates_dataset(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] in {"queued", "running", "ready"}
+    assert response.json()["status"] in {"queued", "running", "succeeded"}
     assert response.json()["progress_percent"] >= 5
     assert response.json()["current_step"]
 
     job_id = response.json()["id"]
-    for _ in range(10):
+    for _ in range(30):
         job_response = client.get(f"/api/tunes/{job_id}")
-        if job_response.json()["status"] == "ready":
+        if job_response.json()["status"] == "succeeded":
             break
         sleep(0.01)
 
     assert job_response.status_code == 200
+    assert job_response.json()["status"] == "succeeded"
     assert job_response.json()["progress_percent"] == 100
-    assert "MLX training execution is not wired yet" in job_response.json()["message"]
+    assert job_response.json()["train_loss"] == 1.5
     assert job_response.json()["logs"]
+
+    activate_resp = client.post("/api/adapters/demo/activate")
+    assert activate_resp.status_code == 200
+    assert activate_resp.json()["active"] is True
+
+    deactivate_resp = client.post("/api/adapters/deactivate")
+    assert deactivate_resp.status_code == 200
+    assert deactivate_resp.json()["active"] is None
 
 
 def test_synthetic_dataset_route_creates_data(tmp_path) -> None:
@@ -250,3 +276,17 @@ def test_adapters_route_lists_registry() -> None:
 
     assert response.status_code == 200
     assert "adapters" in response.json()
+
+
+def test_api_rejects_invalid_adapter_name_and_unknown_tune_cancel() -> None:
+    client = TestClient(create_app())
+
+    bad_adapter = client.post("/api/adapters/..evil/activate")
+    assert bad_adapter.status_code == 400
+
+    unknown_cancel = client.post("/api/tunes/nonexistent/cancel")
+    assert unknown_cancel.status_code == 404
+
+    tunes_list = client.get("/api/tunes")
+    assert tunes_list.status_code == 200
+    assert "tunes" in tunes_list.json()

@@ -16,19 +16,18 @@ Supported JSONL records:
 
 Each example must be one JSON object on one line.
 
-## Starter Command Shape
+## CLI Fine-Tuning Command
 
 ```bash
 gemma4-mlx-mac tune start \
-  --model mlx-community/gemma-4-e2b-it-4bit \
+  --model mlx-community/gemma-4-E2B-it-qat-4bit \
   --data ./examples/data \
   --adapter-name demo-adapter \
-  --iters 100
+  --iters 100 \
+  --wait
 ```
 
-The starter validates dataset shape and records a job. The web UI polls `GET /api/tunes/{id}` to show status, progress percent, current step, and recent activity logs.
-
-`ready` means the dataset and job metadata are prepared for the MLX trainer. The MLX execution layer will map this into `mlx_lm.lora` with LoRA/QLoRA defaults; until that runner is wired, no model weights are changed.
+`TuneJobStore` validates the dataset, resolves any local/cached model snapshot, and runs `python -m mlx_lm lora` as a managed subprocess. The backend parses iteration progress, train/val loss, throughput, and peak memory live (`GET /api/tunes/{id}`), supports cancellation (`POST /api/tunes/{id}/cancel`), and writes adapter weights into `adapters/<adapter_name>` so activating the adapter routes Chat completions through `adapter_path`.
 
 ## Memory Notes
 

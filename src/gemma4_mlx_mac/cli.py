@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import webbrowser
 from pathlib import Path
 
@@ -94,6 +95,8 @@ def chat(
     model: str = typer.Option(DEFAULT_MODEL_ID, help="Model profile to use."),
     max_tokens: int = typer.Option(512, min=1, help="Maximum tokens to generate."),
     temperature: float = typer.Option(0.7, min=0, help="Sampling temperature."),
+    thinking: bool = typer.Option(False, "--thinking", help="Enable native Gemma 4 Thinking Mode."),
+    adapter: Path | None = typer.Option(None, "--adapter", help="Optional LoRA adapter directory."),
 ) -> None:
     """Send a one-shot chat prompt."""
     request = ChatCompletionRequest(
@@ -101,6 +104,8 @@ def chat(
         messages=[ChatMessage(role="user", content=prompt)],
         max_tokens=max_tokens,
         temperature=temperature,
+        show_thinking=thinking,
+        adapter_path=str(adapter) if adapter else None,
     )
     try:
         response = ChatService().create_completion(request)
@@ -135,12 +140,14 @@ def models_cmd() -> None:
     table = Table(title="Model profiles")
     table.add_column("Default")
     table.add_column("Model", no_wrap=True)
+    table.add_column("Quant")
     table.add_column("Memory")
     table.add_column("Notes")
     for profile in list_model_profiles():
         table.add_row(
             "*" if profile.default else "",
             profile.id,
+            profile.quantization,
             f"{profile.recommended_memory_gb} GB",
             profile.notes,
         )
@@ -221,7 +228,9 @@ def adapters_cmd(root: Path = typer.Option(Path("adapters"), help="Adapter direc
         console.print("No adapters found.")
         return
     for adapter in found:
-        console.print(f"{'* ' if adapter.active else '  '}{adapter.id} -> {adapter.path}")
+        marker = "* " if adapter.active else "  "
+        weights = " [weights]" if adapter.has_weights else ""
+        console.print(f"{marker}{adapter.id} -> {adapter.path}{weights}")
 
 
 @tune_app.command("start")
@@ -231,18 +240,40 @@ def tune_start(
     model: str = typer.Option(DEFAULT_MODEL_ID, help="Base model profile."),
     iters: int = typer.Option(100, min=1, help="Training iterations."),
     batch_size: int = typer.Option(1, min=1, help="Per-step batch size."),
+    learning_rate: float = typer.Option(1e-5, min=1e-9, help="Optimizer learning rate."),
+    grad_checkpoint: bool = typer.Option(
+        False,
+        "--grad-checkpoint",
+        help="Enable gradient checkpointing to reduce unified memory usage.",
+    ),
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        help="Wait for the training job to finish and print final status.",
+    ),
 ) -> None:
-    """Validate a dataset and enqueue a starter tuning job."""
+    """Validate a dataset and run an MLX-LM LoRA/QLoRA fine-tuning job."""
     request = TuneRequest(
         model=model,
         data_path=str(data),
         adapter_name=adapter_name,
         iters=iters,
         batch_size=batch_size,
+        learning_rate=learning_rate,
+        grad_checkpoint=grad_checkpoint,
     )
     store = TuneJobStore()
     job = store.create(request)
+    if wait:
+        while True:
+            current = store.get(job.id)
+            if current is None or current.status in {"succeeded", "failed", "cancelled"}:
+                job = current or job
+                break
+            time.sleep(0.25)
     console.print_json(data=job.model_dump(mode="json"))
+    if wait and job.status == "failed":
+        raise typer.Exit(1)
 
 
 @tune_app.command("validate")

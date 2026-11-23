@@ -23,11 +23,23 @@ from .system import collect_system_info
 from .tuning import TuneJobStore, TuneRequest
 
 router = APIRouter()
-chat_service = ChatService()
-tune_jobs = TuneJobStore()
 adapters = AdapterRegistry()
 model_downloads = ModelDownloadJobStore()
 mlx_installer = MlxInstallerJobStore()
+
+
+def _resolve_model_path(model_id: str) -> str | None:
+    return model_downloads.downloaded_paths().get(model_id) or get_cached_model_path(model_id)
+
+
+chat_service = ChatService(
+    model_path_resolver=_resolve_model_path,
+    active_adapter_resolver=adapters.active_adapter_path,
+)
+tune_jobs = TuneJobStore(
+    adapter_registry=adapters,
+    model_path_resolver=_resolve_model_path,
+)
 
 
 @router.get("/api/system")
@@ -81,6 +93,7 @@ def list_model_downloads() -> dict:
 def get_inference_status() -> dict:
     status = mlx_installer.status().model_dump(mode="json")
     status["model_memory"] = chat_service.memory_status().model_dump(mode="json")
+    status["active_adapter"] = adapters.active_adapter_id()
     return status
 
 
@@ -190,6 +203,11 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+@router.get("/api/tunes")
+def list_tunes() -> dict:
+    return {"tunes": [job.model_dump(mode="json") for job in tune_jobs.list()]}
+
+
 @router.post("/api/tunes")
 def create_tune(request: TuneRequest) -> dict:
     try:
@@ -207,6 +225,14 @@ def get_tune(job_id: str) -> dict:
     return job.model_dump(mode="json")
 
 
+@router.post("/api/tunes/{job_id}/cancel")
+def cancel_tune(job_id: str) -> dict:
+    job = tune_jobs.cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Tune job not found.")
+    return job.model_dump(mode="json")
+
+
 @router.post("/api/datasets/synthetic")
 def create_synthetic_data(request: SyntheticDatasetRequest) -> dict:
     try:
@@ -218,7 +244,16 @@ def create_synthetic_data(request: SyntheticDatasetRequest) -> dict:
 
 @router.post("/api/adapters/{adapter_id}/activate")
 def activate_adapter(adapter_id: str) -> dict:
-    return adapters.activate(adapter_id).model_dump()
+    try:
+        return adapters.activate(adapter_id).model_dump()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/adapters/deactivate")
+def deactivate_adapter() -> dict:
+    adapters.deactivate()
+    return {"active": None}
 
 
 @router.get("/api/adapters")
