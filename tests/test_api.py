@@ -1,3 +1,4 @@
+from pathlib import Path
 from time import sleep
 
 from fastapi.testclient import TestClient
@@ -5,10 +6,12 @@ from fastapi.testclient import TestClient
 from gemma4_mlx_mac import api
 from gemma4_mlx_mac.app import create_app
 from gemma4_mlx_mac.downloads import ModelDownloader, ModelDownloadJobStore
-from gemma4_mlx_mac.inference import GeneratedToken
+from gemma4_mlx_mac.inference import GeneratedToken, InferenceNotReady
 from gemma4_mlx_mac.mlx_setup import MlxInstallJob, MlxStatus
 from gemma4_mlx_mac.models import DEFAULT_MODEL_ID
 from gemma4_mlx_mac.tuning import TuneJobStore
+
+EXAMPLES_DATA = str(Path(__file__).resolve().parents[1] / "examples" / "data")
 
 
 def test_health_system_and_models_routes() -> None:
@@ -36,7 +39,11 @@ def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -
     monkeypatch.setattr(
         api,
         "model_downloads",
-        ModelDownloadJobStore(ModelDownloader(fake_snapshot_download), max_workers=1),
+        ModelDownloadJobStore(
+            ModelDownloader(fake_snapshot_download),
+            max_workers=1,
+            state_file=tmp_path / "state.json",
+        ),
     )
     client = TestClient(create_app())
 
@@ -193,36 +200,62 @@ def test_chat_route_streams_tokens_and_metrics(monkeypatch) -> None:
     assert "data: [DONE]" in body
 
 
-def test_tune_job_route_validates_dataset(monkeypatch) -> None:
-    monkeypatch.setattr(api, "tune_jobs", TuneJobStore(step_delay=0))
+def test_tune_job_route_runs_mlx_lora_and_registers_adapter(monkeypatch, tmp_path) -> None:
+    from gemma4_mlx_mac.adapters import AdapterRegistry
+
+    registry = AdapterRegistry(tmp_path / "adapters")
+
+    def fake_runner(_command, on_line, _is_cancelled, _set_process):
+        on_line("Iter 1: Train loss 1.500, Tokens/sec 250.0, Peak mem 3.50 GB")
+        return 0
+
+    monkeypatch.setattr(api, "adapters", registry)
+    monkeypatch.setattr(
+        api,
+        "tune_jobs",
+        TuneJobStore(
+            adapter_registry=registry,
+            command_runner=fake_runner,
+            mlx_checker=lambda: True,
+        ),
+    )
     client = TestClient(create_app())
 
     response = client.post(
         "/api/tunes",
         json={
             "model": DEFAULT_MODEL_ID,
-            "data_path": "examples/data",
+            "data_path": EXAMPLES_DATA,
             "adapter_name": "demo",
             "iters": 1,
         },
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] in {"queued", "running", "ready"}
+    assert response.json()["status"] in {"queued", "running", "succeeded"}
     assert response.json()["progress_percent"] >= 5
     assert response.json()["current_step"]
 
     job_id = response.json()["id"]
-    for _ in range(10):
+    for _ in range(30):
         job_response = client.get(f"/api/tunes/{job_id}")
-        if job_response.json()["status"] == "ready":
+        if job_response.json()["status"] == "succeeded":
             break
         sleep(0.01)
 
     assert job_response.status_code == 200
+    assert job_response.json()["status"] == "succeeded"
     assert job_response.json()["progress_percent"] == 100
-    assert "MLX training execution is not wired yet" in job_response.json()["message"]
+    assert job_response.json()["train_loss"] == 1.5
     assert job_response.json()["logs"]
+
+    activate_resp = client.post("/api/adapters/demo/activate")
+    assert activate_resp.status_code == 200
+    assert activate_resp.json()["active"] is True
+
+    deactivate_resp = client.post("/api/adapters/deactivate")
+    assert deactivate_resp.status_code == 200
+    assert deactivate_resp.json()["active"] is None
 
 
 def test_synthetic_dataset_route_creates_data(tmp_path) -> None:
@@ -250,3 +283,115 @@ def test_adapters_route_lists_registry() -> None:
 
     assert response.status_code == 200
     assert "adapters" in response.json()
+
+
+def test_api_rejects_invalid_adapter_name_and_unknown_tune_cancel() -> None:
+    client = TestClient(create_app())
+
+    bad_adapter = client.post("/api/adapters/..evil/activate")
+    assert bad_adapter.status_code == 400
+
+    unknown_cancel = client.post("/api/tunes/nonexistent/cancel")
+    assert unknown_cancel.status_code == 404
+
+    tunes_list = client.get("/api/tunes")
+    assert tunes_list.status_code == 200
+    assert "tunes" in tunes_list.json()
+
+
+def test_openai_models_and_unload_routes() -> None:
+    with TestClient(create_app()) as client:
+        v1_models = client.get("/v1/models")
+        assert v1_models.status_code == 200
+        payload = v1_models.json()
+        assert payload["object"] == "list"
+        assert any(item["id"] == DEFAULT_MODEL_ID for item in payload["data"])
+
+        unload = client.post("/api/models/unload")
+        assert unload.status_code == 200
+        assert unload.json()["model_memory"]["loaded"] is False
+
+
+def test_streaming_chat_returns_503_before_stream_when_not_ready(monkeypatch) -> None:
+    class FailingChatService:
+        def prepare_request(self, _request):
+            raise InferenceNotReady("Model not downloaded yet.")
+
+    monkeypatch.setattr(api, "chat_service", FailingChatService())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": DEFAULT_MODEL_ID,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["type"] == "not_ready"
+
+
+def test_streaming_chat_emits_assistant_role_and_optional_usage(monkeypatch) -> None:
+    class FakeChatService:
+        def prepare_request(self, _request):
+            return None
+
+        def stream_tokens(self, _request):
+            yield GeneratedToken(
+                text="ok",
+                prompt_tokens=5,
+                completion_tokens=1,
+                elapsed_seconds=0.1,
+                tokens_per_second=10.0,
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(api, "chat_service", FakeChatService())
+    client = TestClient(create_app())
+
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": DEFAULT_MODEL_ID,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    ) as response:
+        body = response.read().decode()
+
+    assert response.status_code == 200
+    assert '"role": "assistant"' in body
+    assert '"total_tokens": 6' in body
+
+
+def test_activate_missing_adapter_returns_404(monkeypatch, tmp_path) -> None:
+    from gemma4_mlx_mac.adapters import AdapterRegistry
+
+    monkeypatch.setattr(api, "adapters", AdapterRegistry(tmp_path / "adapters"))
+    client = TestClient(create_app())
+
+    resp = client.post("/api/adapters/missing-adapter/activate")
+    assert resp.status_code == 404
+
+
+def test_local_only_security_guard_blocks_foreign_host_and_origin() -> None:
+    client = TestClient(create_app())
+
+    bad_host = client.get("/api/system", headers={"host": "evil.example.com"})
+    assert bad_host.status_code == 403
+
+    bad_origin = client.post(
+        "/api/models/unload",
+        headers={"origin": "https://evil.example.com"},
+    )
+    assert bad_origin.status_code == 403
+
+    local_origin = client.post(
+        "/api/models/unload",
+        headers={"origin": "http://127.0.0.1:8080"},
+    )
+    assert local_origin.status_code == 200

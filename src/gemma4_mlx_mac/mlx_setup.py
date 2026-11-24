@@ -87,7 +87,8 @@ class MlxInstallerJobStore:
         max_workers: int = 1,
     ) -> None:
         self._command_builder = command_builder
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._max_workers = max_workers
+        self._executor: ThreadPoolExecutor | None = None
         self._jobs: dict[str, MlxInstallJob] = {}
         self._lock = Lock()
 
@@ -144,7 +145,8 @@ class MlxInstallerJobStore:
         )
         with self._lock:
             self._jobs[job.id] = job
-        self._executor.submit(self._run, job.id)
+            executor = self._ensure_executor()
+        executor.submit(self._run, job.id)
         return job
 
     def get(self, job_id: str) -> MlxInstallJob | None:
@@ -154,6 +156,18 @@ class MlxInstallerJobStore:
     def list(self) -> list[MlxInstallJob]:
         with self._lock:
             return list(self._jobs.values())
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        return self._executor
+
+    def shutdown(self) -> None:
+        with self._lock:
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def current_job(self, statuses: set[InstallStatus] | None = None) -> MlxInstallJob | None:
         with self._lock:

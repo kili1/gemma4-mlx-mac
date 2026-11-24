@@ -7,13 +7,18 @@ on:
 
 jobs:
   python:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install
         run: uv pip install --system -e ".[dev]"
       - name: Lint
@@ -33,6 +38,16 @@ jobs:
       - name: Install
         working-directory: frontend
         run: npm ci
+      - name: Test
+        working-directory: frontend
+        run: npm test
       - name: Build
         working-directory: frontend
         run: npm run build
+      - name: Verify committed web bundle is up to date
+        run: |
+          if ! git diff --quiet src/gemma4_mlx_mac/web; then
+            echo "Built frontend assets in src/gemma4_mlx_mac/web are out of sync. Run 'cd frontend && npm run build' and commit the output."
+            git status --short src/gemma4_mlx_mac/web
+            exit 1
+          fi

@@ -19,7 +19,8 @@ def test_cli_models_command() -> None:
     result = runner.invoke(app, ["models"])
 
     assert result.exit_code == 0
-    assert "gemma-4-e2b-it-4bit" in result.output
+    assert "gemma-4-E2B-it-qat-4bit" in result.output
+    assert "gemma-4-12B-it-qat-4bit" in result.output
 
 
 def test_cli_download_command(monkeypatch) -> None:
@@ -47,3 +48,51 @@ def test_cli_install_mlx_already_available(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "already installed" in result.output
+
+
+def test_cli_chat_passes_thinking_and_adapter(monkeypatch, tmp_path) -> None:
+    adapter_dir = tmp_path / "my-adapter"
+    adapter_dir.mkdir()
+    captured: list[object] = []
+
+    def fake_create_completion(self, request):
+        captured.append(request)
+        return {"choices": [{"message": {"content": "Thinking:\nhi\n\nAnswer:\ndone"}}]}
+
+    monkeypatch.setattr(cli.ChatService, "create_completion", fake_create_completion)
+
+    result = runner.invoke(
+        app,
+        ["chat", "Test prompt", "--thinking", "--adapter", str(adapter_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Answer:" in result.output
+    assert len(captured) == 1
+    assert captured[0].show_thinking is True
+    assert captured[0].adapter_path == str(adapter_dir)
+
+
+def test_cli_respects_env_default_model_and_serve_flags(monkeypatch) -> None:
+    monkeypatch.setenv("GEMMA4_MLX_MODEL", "mlx-community/gemma-4-12B-it-qat-4bit")
+    monkeypatch.setenv("GEMMA4_MLX_PORT", "9090")
+    served: dict[str, object] = {}
+
+    def fake_uvicorn_run(app_str, host, port, reload):
+        served.update({"app": app_str, "host": host, "port": port, "reload": reload})
+
+    monkeypatch.setattr(cli.uvicorn, "run", fake_uvicorn_run)
+
+    result = runner.invoke(app, ["serve", "--preload"])
+
+    assert result.exit_code == 0
+    assert served["port"] == 9090
+    assert served["host"] == "127.0.0.1"
+    assert "mlx-community/gemma-4-12B-it-qat-4bit" in result.output
+
+
+def test_cli_doctor_reports_mlx_installed_and_ready() -> None:
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0
+    assert '"mlx_installed"' in result.output
+    assert '"mlx_ready"' in result.output

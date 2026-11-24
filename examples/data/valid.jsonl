@@ -1,1 +1,1 @@
-{"text":"Gemma 4 can be run locally with MLX on Apple Silicon."}
+{"messages":[{"role":"system","content":"You are a concise local assistant."},{"role":"user","content":"How can Gemma 4 run locally on a Mac?"},{"role":"assistant","content":"Gemma 4 runs locally on Apple Silicon with MLX unified memory."}]}

@@ -7,6 +7,8 @@ import sys
 
 from pydantic import BaseModel, Field
 
+from .mlx_setup import is_mlx_available
+
 
 class SystemInfo(BaseModel):
     os_name: str
@@ -16,6 +18,7 @@ class SystemInfo(BaseModel):
     total_memory_gb: float
     is_macos: bool
     is_apple_silicon: bool
+    mlx_installed: bool
     mlx_ready: bool
     recommendations: list[str] = Field(default_factory=list)
 
@@ -50,17 +53,28 @@ def collect_system_info() -> SystemInfo:
     total_memory_gb = round(_memory_bytes() / (1024**3), 1)
     is_macos = os_name == "Darwin"
     is_apple_silicon = is_macos and machine == "arm64"
+    mlx_installed = is_mlx_available()
+    mlx_ready = is_apple_silicon and mlx_installed
     recommendations: list[str] = []
 
     if not is_macos:
         recommendations.append("MLX acceleration requires macOS on Apple Silicon.")
     elif not is_apple_silicon:
         recommendations.append("MLX acceleration is designed for Apple Silicon Macs.")
+    elif not mlx_installed:
+        recommendations.append(
+            "MLX dependencies are not installed yet. Run `gemma4-mlx-mac install-mlx` "
+            "or click Install MLX in the web UI."
+        )
 
     if total_memory_gb and total_memory_gb < 16:
-        recommendations.append("Use the E2B 4-bit profile and short contexts on low-memory Macs.")
+        recommendations.append(
+            "Use the E2B QAT 4-bit profile and short contexts on low-memory Macs."
+        )
     elif total_memory_gb and total_memory_gb < 32:
-        recommendations.append("Start with Gemma 4 E2B 4-bit before trying larger models.")
+        recommendations.append(
+            "Start with Gemma 4 E2B or 12B QAT 4-bit before trying larger models."
+        )
 
     if is_macos:
         major_version = _macos_major_version(platform.mac_ver()[0])
@@ -75,7 +89,8 @@ def collect_system_info() -> SystemInfo:
         total_memory_gb=total_memory_gb,
         is_macos=is_macos,
         is_apple_silicon=is_apple_silicon,
-        mlx_ready=is_apple_silicon,
+        mlx_installed=mlx_installed,
+        mlx_ready=mlx_ready,
         recommendations=recommendations,
     )
 

@@ -1,2 +1,2 @@
 {"messages":[{"role":"system","content":"You are a concise local assistant."},{"role":"user","content":"Say hello to a Mac user."},{"role":"assistant","content":"Hello from your local Mac."}]}
-{"prompt":"What does MLX use on Apple Silicon?","completion":"MLX uses Apple Silicon acceleration and unified memory."}
+{"messages":[{"role":"system","content":"You are a concise local assistant."},{"role":"user","content":"What does MLX use on Apple Silicon?"},{"role":"assistant","content":"MLX uses Apple Silicon acceleration and unified memory."}]}
