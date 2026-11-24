@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertCircle, CheckCircle2, Circle, Cpu, Trash2, Wrench } from "lucide-react";
+import { AlertCircle, CheckCircle2, Circle, Cpu, Trash2, Wrench, X } from "lucide-react";
 
 import { formatCommand, formatOptionalBytes } from "../format";
 import type { InferenceStatus, MlxInstallJob, ModelMemoryStatus } from "../types";
@@ -35,9 +35,40 @@ export function StatusBadge({
     tone === "good" ? CheckCircle2 : tone === "bad" || tone === "warn" ? AlertCircle : Circle;
   return (
     <span className={`status-badge ${tone}`}>
-      <Icon size={14} />
+      <Icon size={13} />
       {children}
     </span>
+  );
+}
+
+export function NoticeBanner({
+  message,
+  tone = "warn",
+  onDismiss,
+  action,
+}: {
+  message: string;
+  tone?: "warn" | "good";
+  onDismiss?: () => void;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className={`notice${tone === "good" ? " good" : ""}`} role="status" aria-live="polite">
+      <span>{message}</span>
+      <div className="action-buttons">
+        {action}
+        {onDismiss && (
+          <button
+            type="button"
+            className="notice-dismiss"
+            onClick={onDismiss}
+            aria-label="Dismiss notice"
+          >
+            <X size={15} />
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -52,10 +83,12 @@ export function MetricCard({ label, value }: { label: string; value: string }) {
 
 export function ModelMemoryCard({
   memory,
+  totalSystemGb,
   onUnload,
   isUnloading = false,
 }: {
   memory: ModelMemoryStatus | null;
+  totalSystemGb?: number;
   onUnload?: () => void;
   isUnloading?: boolean;
 }) {
@@ -72,12 +105,22 @@ export function ModelMemoryCard({
       ? formatOptionalBytes(memory.mlx_peak_memory_bytes)
       : null;
 
+  const totalBytes = totalSystemGb && totalSystemGb > 0 ? totalSystemGb * 1024 ** 3 : null;
+  const activePct =
+    totalBytes && memory?.model_memory_bytes
+      ? Math.min(100, (memory.model_memory_bytes / totalBytes) * 100)
+      : 0;
+  const cachePct =
+    totalBytes && memory?.mlx_cache_memory_bytes
+      ? Math.min(100 - activePct, (memory.mlx_cache_memory_bytes / totalBytes) * 100)
+      : 0;
+
   return (
     <section className="panel memory-card" aria-label="Model memory usage">
       <div className="block-heading memory-heading">
         <span className="heading-inline">
-          <Cpu size={18} />
-          <strong>Model memory</strong>
+          <Cpu size={16} />
+          <strong>Unified memory</strong>
         </span>
         {memory?.loaded && onUnload && (
           <button
@@ -88,13 +131,22 @@ export function ModelMemoryCard({
             onClick={onUnload}
             title="Unload loaded models from unified memory"
           >
-            <Trash2 size={14} />
+            <Trash2 size={13} />
             <span>{isUnloading ? "Unloading" : "Unload"}</span>
           </button>
         )}
       </div>
       <strong className="memory-value">{value}</strong>
-      <p>{memory?.note ?? "Reading local memory status..."}</p>
+      {totalBytes && (
+        <div
+          className="memory-bar-stack"
+          title={`Unified memory footprint vs ${totalSystemGb} GB total`}
+        >
+          <div className="memory-bar-active" style={{ width: `${activePct}%` }} />
+          {cachePct > 0 && <div className="memory-bar-cache" style={{ width: `${cachePct}%` }} />}
+        </div>
+      )}
+      <p>{memory?.note ?? "Reading local memory status…"}</p>
       <dl className="memory-details">
         <div>
           <dt>Loaded</dt>
@@ -130,9 +182,7 @@ export function ModelMemoryCard({
               <strong>{item.id}</strong>
               <div className="badges">
                 <span>{item.backend === "vlm" ? "mlx-vlm" : "mlx-lm"}</span>
-                {item.adapter_path && (
-                  <span className="good">LoRA: {item.adapter_path}</span>
-                )}
+                {item.adapter_path && <span className="good">LoRA: {item.adapter_path}</span>}
               </div>
               <small>{item.path}</small>
             </li>
@@ -174,8 +224,8 @@ export function InferenceSetup({
         data-busy={isInstalling || undefined}
         onClick={onInstall}
       >
-        <Wrench size={18} />
-        <span>{isInstalling ? "Installing" : "Install MLX"}</span>
+        <Wrench size={16} />
+        <span>{isInstalling ? "Installing…" : "Install MLX"}</span>
       </button>
       {job && (
         <div className="setup-progress">

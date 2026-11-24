@@ -1,4 +1,19 @@
 export type View = "chat" | "models" | "tune" | "adapters" | "system";
+export type ThemeMode = "light" | "dark" | "system";
+
+export type ChatSession = {
+  id: string;
+  title: string;
+  model: string;
+  updatedAt: number;
+  turns: ChatTurn[];
+};
+
+export type LossPoint = {
+  iter: number;
+  trainLoss?: number;
+  valLoss?: number;
+};
 
 export type ModelProfile = {
   id: string;

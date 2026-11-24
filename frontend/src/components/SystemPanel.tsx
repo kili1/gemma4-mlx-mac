@@ -1,13 +1,22 @@
 import React from "react";
+import { Check, Copy, RefreshCw } from "lucide-react";
 
 import { fetchJson } from "../api";
 import type { InferenceStatus, SystemInfo } from "../types";
-import { MetricCard, ModelMemoryCard, PageHeader, StatusBadge } from "./Common";
+import { MetricCard, ModelMemoryCard, NoticeBanner, PageHeader, StatusBadge } from "./Common";
 
-export function SystemPanel() {
+export function SystemPanel({
+  onStatusChange,
+  onSystemLoaded,
+}: {
+  onStatusChange?: (status: InferenceStatus) => void;
+  onSystemLoaded?: (system: SystemInfo) => void;
+}) {
   const [system, setSystem] = React.useState<SystemInfo | null>(null);
   const [inference, setInference] = React.useState<InferenceStatus | null>(null);
   const [isUnloading, setIsUnloading] = React.useState(false);
+  const [isRefreshing, setIsRefreshing] = React.useState(false);
+  const [copiedDiag, setCopiedDiag] = React.useState(false);
   const [message, setMessage] = React.useState("");
 
   React.useEffect(() => {
@@ -15,6 +24,7 @@ export function SystemPanel() {
   }, []);
 
   async function refresh() {
+    setIsRefreshing(true);
     try {
       const [systemData, inferenceData] = await Promise.all([
         fetchJson<SystemInfo>("/api/system", undefined, "Could not load system status."),
@@ -26,8 +36,12 @@ export function SystemPanel() {
       ]);
       setSystem(systemData);
       setInference(inferenceData);
+      onSystemLoaded?.(systemData);
+      onStatusChange?.(inferenceData);
     } catch (error: unknown) {
       setMessage(error instanceof Error ? error.message : "Could not load system status.");
+    } finally {
+      setIsRefreshing(false);
     }
   }
 
@@ -44,17 +58,54 @@ export function SystemPanel() {
     }
   }
 
+  async function copyDiagnostics() {
+    if (!system) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(system, null, 2));
+      setCopiedDiag(true);
+      window.setTimeout(() => setCopiedDiag(false), 1600);
+    } catch {
+      // Clipboard unavailable.
+    }
+  }
+
   return (
     <>
-      <PageHeader title="System" eyebrow="Runtime status">
+      <PageHeader title="System" eyebrow="Apple Silicon & runtime diagnostics">
         <StatusBadge tone={system?.mlx_ready ? "good" : "warn"}>
           {system?.mlx_ready ? "MLX ready" : "MLX setup"}
         </StatusBadge>
+        {system && (
+          <button
+            type="button"
+            className="secondary compact-button"
+            onClick={copyDiagnostics}
+            title="Copy doctor JSON for bug reports"
+          >
+            {copiedDiag ? <Check size={14} /> : <Copy size={14} />}
+            <span>{copiedDiag ? "Copied JSON" : "Copy doctor JSON"}</span>
+          </button>
+        )}
+        <button
+          type="button"
+          className="secondary compact-button"
+          disabled={isRefreshing}
+          data-busy={isRefreshing || undefined}
+          onClick={refresh}
+        >
+          <RefreshCw size={14} />
+          <span>Refresh</span>
+        </button>
       </PageHeader>
-      {message && <p className="notice">{message}</p>}
+      {message && <NoticeBanner message={message} onDismiss={() => setMessage("")} />}
       <div className="stats-grid">
         <MetricCard label="Machine" value={system?.machine ?? "Loading"} />
-        <MetricCard label="Memory" value={system ? `${system.total_memory_gb} GB` : "Loading"} />
+        <MetricCard
+          label="Unified Memory"
+          value={system ? `${system.total_memory_gb} GB` : "Loading"}
+        />
         <MetricCard label="Python" value={system?.python_version ?? "Loading"} />
         <MetricCard
           label="MLX Text"
@@ -80,12 +131,12 @@ export function SystemPanel() {
               : "Loading"
           }
         />
-        <MetricCard label="Default Model" value={system?.default_model ?? "Loading"} />
         <MetricCard label="Active Adapter" value={inference?.active_adapter ?? "None"} />
       </div>
       <div className="system-memory-wrap">
         <ModelMemoryCard
           memory={inference?.model_memory ?? null}
+          totalSystemGb={system?.total_memory_gb}
           onUnload={unloadModels}
           isUnloading={isUnloading}
         />

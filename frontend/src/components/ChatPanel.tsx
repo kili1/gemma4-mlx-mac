@@ -1,32 +1,83 @@
 import React from "react";
 import {
-  Activity,
+  ArrowRight,
+  Brain,
+  Check,
+  Copy,
   FileAudio,
   HardDrive,
   ImagePlus,
-  MessageSquareText,
-  RotateCcw,
+  MessageSquarePlus,
+  PanelRightClose,
+  PanelRightOpen,
+  RefreshCw,
   Send,
   SlidersHorizontal,
   Square,
+  Trash2,
   X,
 } from "lucide-react";
 
 import { fetchJson, readChatStream, readErrorMessage } from "../api";
 import { formatBytes, formatTokensPerSecond, parsePositiveFloat, parsePositiveInt } from "../format";
 import { buildOpenAiContentParts, readFileAsAttachment } from "../media";
+import { loadChatSessions, saveChatSessions, summarizeSessionTitle } from "../storage";
 import type {
+  ChatSession,
   ChatTurn,
   InferenceStatus,
   MediaAttachment,
   MlxInstallJob,
   ModelProfile,
   ModelSource,
+  View,
 } from "../types";
-import { InferenceSetup, ModelMemoryCard, PageHeader, StatusBadge } from "./Common";
+import { InferenceSetup, ModelMemoryCard, NoticeBanner, PageHeader, StatusBadge } from "./Common";
 import { MarkdownMessage } from "./MarkdownMessage";
 
-export function ChatPanel() {
+const STARTER_PROMPTS: Array<{
+  title: string;
+  subtitle: string;
+  prompt: string;
+  thinking?: boolean;
+}> = [
+  {
+    title: "Compare MoE vs dense",
+    subtitle: "Why Gemma 4 26B-A4B runs fast on Apple Silicon",
+    prompt:
+      "Compare Gemma 4 26B-A4B MoE vs dense 31B for local Apple Silicon inference in a concise table.",
+  },
+  {
+    title: "Reason with Thinking Mode",
+    subtitle: "Step-by-step native Gemma 4 thought channel",
+    prompt: "A 16 GB Mac loads a 4.5 GB model and KV cache grows at 12 MB per 1K tokens. How much headroom remains at 64K context?",
+    thinking: true,
+  },
+  {
+    title: "Write a clean Python CLI",
+    subtitle: "Code generation with syntax copy block",
+    prompt: "Write a minimal Python 3.11 script using pathlib to find the 10 largest files in a folder and print human-readable sizes.",
+  },
+  {
+    title: "Local architecture review",
+    subtitle: "Or drop/paste any screenshot or audio clip",
+    prompt: "Give me a 5-point checklist for designing a local-only AI desktop tool that protects user privacy.",
+  },
+];
+
+export function ChatPanel({
+  activeModelHint,
+  totalSystemGb,
+  onNavigate,
+  onStatusChange,
+  isVisible,
+}: {
+  activeModelHint?: string | null;
+  totalSystemGb?: number;
+  onNavigate: (view: View) => void;
+  onStatusChange?: (status: InferenceStatus) => void;
+  isVisible: boolean;
+}) {
   const [models, setModels] = React.useState<ModelProfile[]>([]);
   const [selectedModel, setSelectedModel] = React.useState("");
   const [modelSource, setModelSource] = React.useState<ModelSource>("downloaded");
@@ -34,13 +85,23 @@ export function ChatPanel() {
   const [prompt, setPrompt] = React.useState("");
   const [attachments, setAttachments] = React.useState<MediaAttachment[]>([]);
   const [isDragOver, setIsDragOver] = React.useState(false);
+  const [inspectorOpen, setInspectorOpen] = React.useState(true);
+
   const [systemPrompt, setSystemPrompt] = React.useState("");
-  const [temperatureInput, setTemperatureInput] = React.useState("0.7");
-  const [topPInput, setTopPInput] = React.useState("0.95");
+  const [temperature, setTemperature] = React.useState(0.7);
+  const [topP, setTopP] = React.useState(0.95);
   const [maxTokensInput, setMaxTokensInput] = React.useState("1024");
-  const [turns, setTurns] = React.useState<ChatTurn[]>([]);
-  const [message, setMessage] = React.useState("");
   const [showThinking, setShowThinking] = React.useState(false);
+
+  const [sessions, setSessions] = React.useState<ChatSession[]>(() => loadChatSessions());
+  const [activeSessionId, setActiveSessionId] = React.useState<string>(() => {
+    const loaded = loadChatSessions();
+    return loaded[0]?.id ?? `session-${Date.now()}`;
+  });
+  const [turns, setTurns] = React.useState<ChatTurn[]>(() => loadChatSessions()[0]?.turns ?? []);
+
+  const [copiedTurnId, setCopiedTurnId] = React.useState<string | null>(null);
+  const [message, setMessage] = React.useState("");
   const [isSending, setIsSending] = React.useState(false);
   const [isUnloading, setIsUnloading] = React.useState(false);
   const [inferenceStatus, setInferenceStatus] = React.useState<InferenceStatus | null>(null);
@@ -50,6 +111,7 @@ export function ChatPanel() {
   const pollTimerRef = React.useRef<number | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
   const threadEndRef = React.useRef<HTMLDivElement | null>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const imageInputRef = React.useRef<HTMLInputElement | null>(null);
   const audioInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -58,8 +120,6 @@ export function ChatPanel() {
     downloadedModels.find((model) => model.id === selectedModel) ?? null;
   const activeModel =
     modelSource === "path" ? modelPath.trim() : selectedDownloadedModel?.id ?? "";
-  const activeModelLabel =
-    modelSource === "path" ? modelPath.trim() || "No model path selected" : activeModel;
   const inferenceReady = inferenceStatus?.available === true;
   const multimodalReady = inferenceStatus?.multimodal_available === true;
   const supportsAudio =
@@ -84,9 +144,56 @@ export function ChatPanel() {
     };
   }, []);
 
+  // Refresh models/status whenever the user switches back to Chat (e.g. after downloading or activating an adapter).
+  React.useEffect(() => {
+    if (isVisible) {
+      loadModels();
+      loadInferenceStatus();
+    }
+  }, [isVisible]);
+
+  // Honor cross-tab "Chat with this model" navigation from ModelsPanel.
+  React.useEffect(() => {
+    if (activeModelHint) {
+      setModelSource("downloaded");
+      setSelectedModel(activeModelHint);
+    }
+  }, [activeModelHint]);
+
+  // Auto-grow composer textarea smoothly.
+  React.useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+  }, [prompt]);
+
   React.useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [turns]);
+
+  // Persist current session to localStorage whenever turns settle.
+  React.useEffect(() => {
+    if (turns.length === 0) {
+      return;
+    }
+    const firstUserTurn = turns.find((t) => t.role === "user");
+    const title = summarizeSessionTitle(firstUserTurn?.content ?? "New chat");
+    setSessions((prev) => {
+      const updated: ChatSession = {
+        id: activeSessionId,
+        title,
+        model: activeModel,
+        updatedAt: Date.now(),
+        turns,
+      };
+      const next = [updated, ...prev.filter((item) => item.id !== activeSessionId)];
+      saveChatSessions(next);
+      return next;
+    });
+  }, [turns, activeSessionId, activeModel]);
 
   async function loadModels() {
     try {
@@ -102,7 +209,12 @@ export function ChatPanel() {
       const availableModels = data.models.filter((model) => model.downloaded);
       const defaultModel = availableModels.find((model) => model.default) ?? availableModels[0];
       if (defaultModel) {
-        setSelectedModel((prev) => prev || defaultModel.id);
+        setSelectedModel((prev) => {
+          if (prev && availableModels.some((item) => item.id === prev)) {
+            return prev;
+          }
+          return defaultModel.id;
+        });
         if (defaultModel.local_path) {
           setModelPath((prev) => prev || defaultModel.local_path || "");
         }
@@ -127,6 +239,7 @@ export function ChatPanel() {
         return;
       }
       setInferenceStatus(status);
+      onStatusChange?.(status);
       if (status.job) {
         setInstallJob(status.job);
       }
@@ -290,19 +403,50 @@ export function ChatPanel() {
     }
   }
 
-  function chooseModelSource(source: ModelSource) {
-    setModelSource(source);
-    if (source === "path" && !modelPath && selectedDownloadedModel?.local_path) {
-      setModelPath(selectedDownloadedModel.local_path);
+  function startNewSession() {
+    abortRef.current?.abort();
+    const freshId = `session-${Date.now()}`;
+    setActiveSessionId(freshId);
+    setTurns([]);
+    setAttachments([]);
+    setMessage("");
+    textareaRef.current?.focus();
+  }
+
+  function selectSession(sessionId: string) {
+    abortRef.current?.abort();
+    const target = sessions.find((item) => item.id === sessionId);
+    if (!target) {
+      return;
     }
+    setActiveSessionId(target.id);
+    setTurns(target.turns);
+    setAttachments([]);
     setMessage("");
   }
 
-  function chooseDownloadedModel(modelId: string) {
-    setSelectedModel(modelId);
-    const model = downloadedModels.find((profile) => profile.id === modelId);
-    if (model?.local_path && modelSource === "path") {
-      setModelPath(model.local_path);
+  function deleteActiveSession() {
+    abortRef.current?.abort();
+    const remaining = sessions.filter((item) => item.id !== activeSessionId);
+    saveChatSessions(remaining);
+    setSessions(remaining);
+    if (remaining[0]) {
+      setActiveSessionId(remaining[0].id);
+      setTurns(remaining[0].turns);
+    } else {
+      setActiveSessionId(`session-${Date.now()}`);
+      setTurns([]);
+    }
+    setAttachments([]);
+  }
+
+  async function copyTurn(turn: ChatTurn) {
+    try {
+      await navigator.clipboard.writeText(turn.content);
+      setCopiedTurnId(turn.id);
+      window.setTimeout(() => setCopiedTurnId((curr) => (curr === turn.id ? null : curr)), 1500);
+    } catch {
+      // Clipboard may be blocked.
     }
   }
 
@@ -310,26 +454,25 @@ export function ChatPanel() {
     abortRef.current?.abort();
   }
 
-  function clearConversation() {
-    abortRef.current?.abort();
-    setTurns([]);
-    setAttachments([]);
-    setMessage("");
-  }
-
-  async function sendPrompt() {
-    const content = prompt.trim();
-    const pendingAttachments = [...attachments];
+  async function runCompletion({
+    baseTurns,
+    userText,
+    pendingAttachments,
+    thinkingOverride,
+  }: {
+    baseTurns: ChatTurn[];
+    userText: string;
+    pendingAttachments: MediaAttachment[];
+    thinkingOverride?: boolean;
+  }) {
+    const useThinking = thinkingOverride ?? showThinking;
     const hasMedia = pendingAttachments.length > 0;
-
     if (!inferenceReady) {
       setMessage("Install MLX inference before chatting.");
       return;
     }
     if (hasMedia && !multimodalReady) {
-      setMessage(
-        "Image and audio chat require `mlx-vlm`. Click Install MLX or run `gemma4-mlx-mac install-mlx`.",
-      );
+      setMessage("Image and audio chat require `mlx-vlm`. Click Install MLX first.");
       return;
     }
     if (!activeModel) {
@@ -340,23 +483,20 @@ export function ChatPanel() {
       );
       return;
     }
-    if (!content && !hasMedia) {
-      setMessage("Enter a prompt or attach an image/audio file first.");
-      return;
-    }
 
     const effectivePrompt =
-      content ||
+      userText.trim() ||
       (pendingAttachments.some((item) => item.kind === "audio")
         ? "Listen to the attached audio and describe or transcribe it."
         : "Describe the attached image.");
 
-    const temperature = parsePositiveFloat(temperatureInput, 0.7, 0, 2);
-    const topP = parsePositiveFloat(topPInput, 0.95, 0.05, 1);
     const maxTokens = parsePositiveInt(maxTokensInput, 1024, 1, 32768);
+    const clampedTemp = parsePositiveFloat(String(temperature), 0.7, 0, 2);
+    const clampedTopP = parsePositiveFloat(String(topP), 0.95, 0.05, 1);
 
     const userTurnId = `user-${Date.now()}`;
     const assistantTurnId = `assistant-${Date.now()}`;
+
     const historyMessages: Array<{
       role: "system" | "user" | "assistant";
       content: string | Array<Record<string, unknown>>;
@@ -364,7 +504,7 @@ export function ChatPanel() {
     if (systemPrompt.trim()) {
       historyMessages.push({ role: "system", content: systemPrompt.trim() });
     }
-    for (const turn of turns) {
+    for (const turn of baseTurns) {
       if (turn.content.trim() || (turn.attachments && turn.attachments.length > 0)) {
         historyMessages.push({
           role: turn.role,
@@ -384,8 +524,8 @@ export function ChatPanel() {
     setMessage("");
     setPrompt("");
     setAttachments([]);
-    setTurns((prev) => [
-      ...prev,
+    setTurns([
+      ...baseTurns,
       {
         id: userTurnId,
         role: "user",
@@ -410,9 +550,9 @@ export function ChatPanel() {
           model: activeModel,
           messages: historyMessages,
           max_tokens: maxTokens,
-          temperature,
-          top_p: topP,
-          show_thinking: showThinking,
+          temperature: clampedTemp,
+          top_p: clampedTopP,
+          show_thinking: useThinking,
           stream: true,
         }),
       });
@@ -471,11 +611,9 @@ export function ChatPanel() {
       } else {
         setMessage(error instanceof Error ? error.message : "Chat request failed.");
         if (!receivedAnyToken) {
-          setPrompt(content);
+          setPrompt(userText);
           setAttachments(pendingAttachments);
-          setTurns((prev) =>
-            prev.filter((turn) => turn.id !== userTurnId && turn.id !== assistantTurnId),
-          );
+          setTurns(baseTurns);
         }
       }
     } finally {
@@ -484,6 +622,51 @@ export function ChatPanel() {
         setIsSending(false);
         loadInferenceStatus();
       }
+    }
+  }
+
+  function sendPrompt() {
+    if (!prompt.trim() && attachments.length === 0) {
+      setMessage("Enter a prompt or attach an image/audio file first.");
+      return;
+    }
+    runCompletion({
+      baseTurns: turns,
+      userText: prompt,
+      pendingAttachments: [...attachments],
+    });
+  }
+
+  function regenerateLastReply() {
+    if (isSending || turns.length < 2) {
+      return;
+    }
+    const lastTurn = turns[turns.length - 1];
+    const prevUser = turns[turns.length - 2];
+    if (lastTurn.role !== "assistant" || prevUser.role !== "user") {
+      return;
+    }
+    runCompletion({
+      baseTurns: turns.slice(0, -2),
+      userText: prevUser.content,
+      pendingAttachments: prevUser.attachments ?? [],
+    });
+  }
+
+  function handleStarterClick(starter: (typeof STARTER_PROMPTS)[number]) {
+    if (starter.thinking) {
+      setShowThinking(true);
+    }
+    if (inferenceReady && activeModel) {
+      runCompletion({
+        baseTurns: [],
+        userText: starter.prompt,
+        pendingAttachments: [],
+        thinkingOverride: starter.thinking ?? showThinking,
+      });
+    } else {
+      setPrompt(starter.prompt);
+      textareaRef.current?.focus();
     }
   }
 
@@ -502,7 +685,7 @@ export function ChatPanel() {
 
   return (
     <>
-      <PageHeader title="Chat" eyebrow="Local text, vision & audio inference">
+      <PageHeader title="Chat" eyebrow="Local text, vision & audio">
         {inferenceStatus?.active_adapter && (
           <StatusBadge tone="good">Adapter: {inferenceStatus.active_adapter}</StatusBadge>
         )}
@@ -510,20 +693,35 @@ export function ChatPanel() {
         <StatusBadge tone={inferenceReady ? "good" : "warn"}>
           {inferenceReady ? "MLX ready" : "MLX setup"}
         </StatusBadge>
-        {turns.length > 0 && (
-          <button
-            type="button"
-            className="secondary compact-button"
-            onClick={clearConversation}
-            title="Start a new chat"
-          >
-            <RotateCcw size={15} />
-            <span>New chat</span>
-          </button>
-        )}
+        <button
+          type="button"
+          className="secondary compact-button"
+          onClick={() => setInspectorOpen((open) => !open)}
+          title={inspectorOpen ? "Hide inspector" : "Show inspector"}
+        >
+          {inspectorOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+          <span>{inspectorOpen ? "Hide panel" : "Controls"}</span>
+        </button>
       </PageHeader>
 
-      <div className="chat-layout">
+      {message && <NoticeBanner message={message} onDismiss={() => setMessage("")} />}
+      {!message && showNoModelsHint && (
+        <NoticeBanner
+          message="No Gemma 4 models are downloaded yet."
+          action={
+            <button
+              type="button"
+              className="secondary compact-button"
+              onClick={() => onNavigate("models")}
+            >
+              <span>Download a model</span>
+              <ArrowRight size={14} />
+            </button>
+          }
+        />
+      )}
+
+      <div className={`chat-layout${inspectorOpen ? "" : " inspector-collapsed"}`}>
         <section
           className={`conversation-panel${isDragOver ? " drag-over" : ""}`}
           aria-label="Conversation"
@@ -531,30 +729,85 @@ export function ChatPanel() {
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
-          {message && <p className="notice">{message}</p>}
-          {!message && showNoModelsHint && (
-            <p className="notice">
-              Download a Gemma 4 model in the Models tab or switch Model source to Path.
-            </p>
-          )}
+          <div className="chat-topbar">
+            <div className="session-controls">
+              <select
+                aria-label="Chat history"
+                className="session-select"
+                value={sessions.some((s) => s.id === activeSessionId) ? activeSessionId : "__new__"}
+                onChange={(event) => {
+                  if (event.target.value === "__new__") {
+                    startNewSession();
+                  } else {
+                    selectSession(event.target.value);
+                  }
+                }}
+              >
+                {!sessions.some((s) => s.id === activeSessionId) && (
+                  <option value="__new__">New conversation</option>
+                )}
+                {sessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="secondary compact-button"
+                onClick={startNewSession}
+                title="Start a new chat"
+              >
+                <MessageSquarePlus size={14} />
+                <span>New</span>
+              </button>
+              {sessions.some((s) => s.id === activeSessionId) && (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={deleteActiveSession}
+                  title="Delete conversation"
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
+            </div>
+            <span className="status-badge neutral tabular">
+              {selectedDownloadedModel?.label ?? (activeModel || "No model selected")}
+            </span>
+          </div>
+
           <div className="chat-thread">
             {turns.length === 0 && (
               <div className="empty-state">
-                <MessageSquareText size={28} />
-                <strong>Ready</strong>
+                <strong>Local Gemma 4 on Apple Silicon</strong>
                 <small>
-                  Multi-turn local chat with Gemma 4. Drop or paste images/audio, press Enter to
-                  send, Shift+Enter for newline.
+                  100% private unified-memory chat. Paste screenshots with ⌘V, drag-and-drop images
+                  or audio clips, or try a starter prompt below.
                 </small>
+                <div className="starter-grid">
+                  {STARTER_PROMPTS.map((starter) => (
+                    <button
+                      type="button"
+                      key={starter.title}
+                      className="starter-chip"
+                      onClick={() => handleStarterClick(starter)}
+                    >
+                      <strong>{starter.title}</strong>
+                      <span>{starter.subtitle}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
+
             {turns.map((turn, idx) => {
-              const isStreamingTurn =
-                isSending && idx === turns.length - 1 && turn.role === "assistant";
+              const isLastTurn = idx === turns.length - 1;
+              const isStreamingTurn = isSending && isLastTurn && turn.role === "assistant";
               if (turn.role === "user") {
                 return (
                   <article className="message user-message" key={turn.id}>
-                    <span>User</span>
+                    <span>You</span>
                     {turn.attachments && turn.attachments.length > 0 && (
                       <div className="turn-attachments">
                         {turn.attachments.map((item) =>
@@ -582,20 +835,48 @@ export function ChatPanel() {
               return (
                 <article className="message assistant-message" key={turn.id}>
                   <div className="message-meta">
-                    <span>Gemma{turn.stopped ? " (stopped)" : ""}</span>
-                    {turn.stats && (
-                      <div className="generation-stats">
-                        <span>{turn.stats.completionTokens} tokens</span>
-                        <span>{formatTokensPerSecond(turn.stats.tokensPerSecond)} tok/s</span>
-                      </div>
-                    )}
+                    <span>Gemma 4{turn.stopped ? " (stopped)" : ""}</span>
+                    <div className="message-actions">
+                      {turn.stats && (
+                        <div className="generation-stats">
+                          <span>{turn.stats.completionTokens} tok</span>
+                          <span>{formatTokensPerSecond(turn.stats.tokensPerSecond)} tok/s</span>
+                        </div>
+                      )}
+                      {turn.content && !isStreamingTurn && (
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => copyTurn(turn)}
+                          title="Copy response"
+                        >
+                          {copiedTurnId === turn.id ? <Check size={13} /> : <Copy size={13} />}
+                          <span>{copiedTurnId === turn.id ? "Copied" : "Copy"}</span>
+                        </button>
+                      )}
+                      {isLastTurn && !isSending && (
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={regenerateLastReply}
+                          title="Regenerate response"
+                        >
+                          <RefreshCw size={13} />
+                          <span>Retry</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {turn.content ? (
                     <MarkdownMessage content={turn.content} streaming={isStreamingTurn} />
                   ) : isStreamingTurn ? (
-                    <p className="pending-copy">Waiting for first token...</p>
+                    <div className="assistant-body">
+                      <p className="pending-copy">Waiting for first token…</p>
+                    </div>
                   ) : (
-                    <p className="pending-copy">(No output)</p>
+                    <div className="assistant-body">
+                      <p className="pending-copy">(No output)</p>
+                    </div>
                   )}
                 </article>
               );
@@ -604,233 +885,253 @@ export function ChatPanel() {
           </div>
 
           <div className="composer">
-            {attachments.length > 0 && (
-              <div className="attachment-tray" aria-label="Attached media">
-                {attachments.map((item) => (
-                  <div className="attachment-chip" key={item.id}>
-                    {item.kind === "image" ? (
-                      <img src={item.dataUrl} alt={item.name} className="attachment-thumb" />
-                    ) : (
-                      <FileAudio size={18} />
-                    )}
-                    <div className="attachment-meta">
-                      <strong>{item.name}</strong>
-                      <small>{formatBytes(item.sizeBytes)}</small>
+            <div className="composer-box">
+              {attachments.length > 0 && (
+                <div className="attachment-tray" aria-label="Attached media">
+                  {attachments.map((item) => (
+                    <div className="attachment-chip" key={item.id}>
+                      {item.kind === "image" ? (
+                        <img src={item.dataUrl} alt={item.name} className="attachment-thumb" />
+                      ) : (
+                        <FileAudio size={18} />
+                      )}
+                      <div className="attachment-meta">
+                        <strong>{item.name}</strong>
+                        <small>{formatBytes(item.sizeBytes)}</small>
+                      </div>
+                      <button
+                        type="button"
+                        className="attachment-remove"
+                        onClick={() => removeAttachment(item.id)}
+                        aria-label={`Remove ${item.name}`}
+                      >
+                        <X size={14} />
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      className="attachment-remove"
-                      onClick={() => removeAttachment(item.id)}
-                      aria-label={`Remove ${item.name}`}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
 
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              hidden
-              onChange={(event) => {
-                if (event.target.files) {
-                  addFiles(event.target.files);
-                }
-                event.target.value = "";
-              }}
-            />
-            <input
-              ref={audioInputRef}
-              type="file"
-              accept="audio/*"
-              multiple
-              hidden
-              onChange={(event) => {
-                if (event.target.files) {
-                  addFiles(event.target.files);
-                }
-                event.target.value = "";
-              }}
-            />
-
-            <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              onPaste={handlePaste}
-              placeholder="Ask Gemma 4 anything, or paste/drop an image or audio clip..."
-            />
-            <div className="chat-actions">
-              <div className="composer-left">
-                <button
-                  type="button"
-                  className="secondary compact-button"
-                  disabled={isSending}
-                  onClick={() => imageInputRef.current?.click()}
-                  title="Attach image (or paste/drop)"
-                >
-                  <ImagePlus size={16} />
-                  <span>Image</span>
-                </button>
-                <button
-                  type="button"
-                  className="secondary compact-button"
-                  disabled={isSending || !supportsAudio}
-                  onClick={() => audioInputRef.current?.click()}
-                  title={
-                    supportsAudio
-                      ? "Attach audio clip (E2B/E4B/12B any-to-any)"
-                      : "Audio requires an any-to-any Gemma 4 model (E2B, E4B, or 12B)"
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(event) => {
+                  if (event.target.files) {
+                    addFiles(event.target.files);
                   }
-                >
-                  <FileAudio size={16} />
-                  <span>Audio</span>
-                </button>
-                <span className="active-model-label">{activeModelLabel}</span>
-              </div>
-              <div className="action-buttons">
-                {isSending && (
+                  event.target.value = "";
+                }}
+              />
+              <input
+                ref={audioInputRef}
+                type="file"
+                accept="audio/*"
+                multiple
+                hidden
+                onChange={(event) => {
+                  if (event.target.files) {
+                    addFiles(event.target.files);
+                  }
+                  event.target.value = "";
+                }}
+              />
+
+              <textarea
+                ref={textareaRef}
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                onPaste={handlePaste}
+                placeholder="Ask Gemma 4 anything, or paste/drop an image or audio clip… (Enter to send)"
+              />
+
+              <div className="chat-actions">
+                <div className="composer-left">
                   <button
                     type="button"
-                    className="secondary icon-button"
-                    onClick={stopGeneration}
-                    title="Stop generation"
+                    className="secondary compact-button"
+                    disabled={isSending}
+                    onClick={() => imageInputRef.current?.click()}
+                    title="Attach image (or paste/drop)"
                   >
-                    <Square size={16} />
-                    <span>Stop</span>
+                    <ImagePlus size={15} />
+                    <span>Image</span>
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="primary icon-button"
-                  disabled={isSending || !activeModel || !inferenceReady}
-                  data-busy={isSending || undefined}
-                  onClick={sendPrompt}
-                  title="Send"
-                >
-                  <Send size={18} />
-                  <span>{isSending ? "Streaming" : "Send"}</span>
-                </button>
+                  <button
+                    type="button"
+                    className="secondary compact-button"
+                    disabled={isSending || !supportsAudio}
+                    onClick={() => audioInputRef.current?.click()}
+                    title={
+                      supportsAudio
+                        ? "Attach audio clip (E2B/E4B/12B any-to-any)"
+                        : "Audio requires E2B, E4B, or 12B any-to-any profile"
+                    }
+                  >
+                    <FileAudio size={15} />
+                    <span>Audio</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`pill-toggle${showThinking ? " active" : ""}`}
+                    disabled={isSending}
+                    onClick={() => setShowThinking((prev) => !prev)}
+                    aria-pressed={showThinking}
+                    title="Toggle native Gemma 4 Thinking Mode"
+                  >
+                    <Brain size={14} />
+                    <span>Thinking</span>
+                  </button>
+                </div>
+
+                <div className="action-buttons">
+                  {isSending && (
+                    <button
+                      type="button"
+                      className="secondary compact-button"
+                      onClick={stopGeneration}
+                      title="Stop generation"
+                    >
+                      <Square size={14} />
+                      <span>Stop</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="primary compact-button"
+                    disabled={isSending || !activeModel || !inferenceReady}
+                    data-busy={isSending || undefined}
+                    onClick={sendPrompt}
+                    title="Send prompt"
+                  >
+                    <Send size={15} />
+                    <span>{isSending ? "Streaming" : "Send"}</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         </section>
 
-        <aside className="control-stack" aria-label="Chat controls">
-          <section className="control-panel" aria-label="Model and response controls">
-            <div className="panel-block">
-              <div className="block-heading">
-                <HardDrive size={18} />
-                <strong>Model</strong>
-              </div>
-              <div className="model-picker">
-                <div className="source-toggle" aria-label="Model source">
-                  <button
-                    className={modelSource === "downloaded" ? "active" : ""}
-                    onClick={() => chooseModelSource("downloaded")}
-                    type="button"
-                  >
-                    Downloaded
-                  </button>
-                  <button
-                    className={modelSource === "path" ? "active" : ""}
-                    onClick={() => chooseModelSource("path")}
-                    type="button"
-                  >
-                    Path
-                  </button>
+        {inspectorOpen && (
+          <aside className="control-stack" aria-label="Chat controls">
+            <section className="control-panel" aria-label="Model and sampling controls">
+              <div className="panel-block">
+                <div className="block-heading">
+                  <HardDrive size={16} />
+                  <strong>Model</strong>
                 </div>
-                {modelSource === "downloaded" ? (
-                  <label className="field">
-                    <span>Profile</span>
-                    <select
-                      value={selectedModel}
-                      onChange={(event) => chooseDownloadedModel(event.target.value)}
-                      disabled={downloadedModels.length === 0 || isSending}
+                <div className="model-picker">
+                  <div className="source-toggle" aria-label="Model source">
+                    <button
+                      className={modelSource === "downloaded" ? "active" : ""}
+                      onClick={() => setModelSource("downloaded")}
+                      type="button"
                     >
-                      {downloadedModels.length === 0 ? (
-                        <option value="">No downloaded models</option>
-                      ) : (
-                        downloadedModels.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                          </option>
-                        ))
+                      Downloaded
+                    </button>
+                    <button
+                      className={modelSource === "path" ? "active" : ""}
+                      onClick={() => {
+                        setModelSource("path");
+                        if (!modelPath && selectedDownloadedModel?.local_path) {
+                          setModelPath(selectedDownloadedModel.local_path);
+                        }
+                      }}
+                      type="button"
+                    >
+                      Local path
+                    </button>
+                  </div>
+                  {modelSource === "downloaded" ? (
+                    <label className="field">
+                      <span>Profile</span>
+                      <select
+                        value={selectedModel}
+                        onChange={(event) => setSelectedModel(event.target.value)}
+                        disabled={downloadedModels.length === 0 || isSending}
+                      >
+                        {downloadedModels.length === 0 ? (
+                          <option value="">No downloaded models</option>
+                        ) : (
+                          downloadedModels.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.label}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                      {selectedDownloadedModel?.local_path && (
+                        <small>{selectedDownloadedModel.local_path}</small>
                       )}
-                    </select>
-                    {selectedDownloadedModel?.local_path && (
-                      <small>{selectedDownloadedModel.local_path}</small>
-                    )}
-                  </label>
-                ) : (
-                  <label className="field">
-                    <span>Path</span>
-                    <input
-                      value={modelPath}
-                      onChange={(event) => setModelPath(event.target.value)}
-                      disabled={isSending}
-                      list="downloaded-model-paths"
-                      placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
-                    />
-                    <datalist id="downloaded-model-paths">
-                      {downloadedModels
-                        .filter((model) => model.local_path)
-                        .map((model) => (
-                          <option key={model.id} value={model.local_path ?? ""}>
-                            {model.label}
-                          </option>
-                        ))}
-                    </datalist>
-                  </label>
-                )}
+                    </label>
+                  ) : (
+                    <label className="field">
+                      <span>Snapshot directory</span>
+                      <input
+                        value={modelPath}
+                        onChange={(event) => setModelPath(event.target.value)}
+                        disabled={isSending}
+                        list="downloaded-model-paths"
+                        placeholder="/Users/me/.cache/huggingface/.../snapshots/..."
+                      />
+                      <datalist id="downloaded-model-paths">
+                        {downloadedModels
+                          .filter((model) => model.local_path)
+                          .map((model) => (
+                            <option key={model.id} value={model.local_path ?? ""}>
+                              {model.label}
+                            </option>
+                          ))}
+                      </datalist>
+                    </label>
+                  )}
+                </div>
               </div>
-            </div>
 
-            <div className="panel-block">
-              <div className="block-heading">
-                <Activity size={18} />
-                <strong>Thinking Mode</strong>
-              </div>
-              <label className="switch-row">
-                <span className="switch-copy">
-                  <strong>Native Thinking</strong>
-                  <small>Enable Gemma 4 thought channel and show collapsible reasoning.</small>
-                </span>
-                <input
-                  aria-label="Enable Gemma 4 Thinking Mode"
-                  checked={showThinking}
-                  className="switch-control"
-                  disabled={isSending}
-                  onChange={(event) => setShowThinking(event.target.checked)}
-                  type="checkbox"
-                />
-              </label>
-            </div>
+              <div className="panel-block">
+                <div className="block-heading">
+                  <SlidersHorizontal size={16} />
+                  <strong>Sampling</strong>
+                </div>
 
-            <div className="panel-block">
-              <div className="block-heading">
-                <SlidersHorizontal size={18} />
-                <strong>Parameters</strong>
-              </div>
-              <div className="form-grid">
                 <label className="field">
-                  <span>Temp</span>
+                  <div className="field-label-row">
+                    <span>Temperature</span>
+                    <small className="tabular">{temperature.toFixed(2)}</small>
+                  </div>
                   <input
-                    type="number"
+                    type="range"
                     min={0}
                     max={2}
-                    step={0.1}
-                    value={temperatureInput}
+                    step={0.05}
+                    value={temperature}
                     disabled={isSending}
-                    onChange={(event) => setTemperatureInput(event.target.value)}
+                    onChange={(event) => setTemperature(Number(event.target.value))}
                   />
                 </label>
+
                 <label className="field">
-                  <span>Max tokens</span>
+                  <div className="field-label-row">
+                    <span>Top-p</span>
+                    <small className="tabular">{topP.toFixed(2)}</small>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={1}
+                    step={0.05}
+                    value={topP}
+                    disabled={isSending}
+                    onChange={(event) => setTopP(Number(event.target.value))}
+                  />
+                </label>
+
+                <label className="field">
+                  <span>Max output tokens</span>
                   <input
                     type="number"
                     min={1}
@@ -841,47 +1142,38 @@ export function ChatPanel() {
                     onChange={(event) => setMaxTokensInput(event.target.value)}
                   />
                 </label>
-              </div>
-              <label className="field">
-                <span>Top-p</span>
-                <input
-                  type="number"
-                  min={0.05}
-                  max={1}
-                  step={0.05}
-                  value={topPInput}
-                  disabled={isSending}
-                  onChange={(event) => setTopPInput(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>System prompt</span>
-                <textarea
-                  className="compact-textarea"
-                  rows={2}
-                  value={systemPrompt}
-                  disabled={isSending}
-                  onChange={(event) => setSystemPrompt(event.target.value)}
-                  placeholder="Optional system instructions..."
-                />
-              </label>
-            </div>
 
-            {needsMlxInstall && (
-              <InferenceSetup
-                status={inferenceStatus}
-                job={installJob}
-                isInstalling={Boolean(isInstalling)}
-                onInstall={startInstall}
-              />
-            )}
-          </section>
-          <ModelMemoryCard
-            memory={inferenceStatus?.model_memory ?? null}
-            onUnload={unloadModels}
-            isUnloading={isUnloading}
-          />
-        </aside>
+                <label className="field">
+                  <span>System prompt</span>
+                  <textarea
+                    className="compact-textarea"
+                    rows={2}
+                    value={systemPrompt}
+                    disabled={isSending}
+                    onChange={(event) => setSystemPrompt(event.target.value)}
+                    placeholder="Optional system instructions…"
+                  />
+                </label>
+              </div>
+
+              {needsMlxInstall && (
+                <InferenceSetup
+                  status={inferenceStatus}
+                  job={installJob}
+                  isInstalling={Boolean(isInstalling)}
+                  onInstall={startInstall}
+                />
+              )}
+            </section>
+
+            <ModelMemoryCard
+              memory={inferenceStatus?.model_memory ?? null}
+              totalSystemGb={totalSystemGb}
+              onUnload={unloadModels}
+              isUnloading={isUnloading}
+            />
+          </aside>
+        )}
       </div>
     </>
   );
