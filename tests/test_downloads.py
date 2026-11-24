@@ -160,6 +160,10 @@ def test_model_download_rejects_system_directory() -> None:
     try:
         with pytest.raises(ValueError, match="system directory"):
             store.start(ModelDownloadRequest(model=DEFAULT_MODEL_ID, local_dir="/etc/gemma4"))
+        with pytest.raises(ValueError, match="system directory"):
+            store.start(
+                ModelDownloadRequest(model=DEFAULT_MODEL_ID, local_dir="/private/etc/gemma4")
+            )
     finally:
         store.shutdown()
 

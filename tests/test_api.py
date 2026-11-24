@@ -33,7 +33,7 @@ def test_model_download_route_uses_huggingface_snapshot(monkeypatch, tmp_path) -
 
     def fake_snapshot_download(**kwargs: object) -> str:
         assert kwargs["repo_id"] == DEFAULT_MODEL_ID
-        assert kwargs["local_dir"] == str(target_dir)
+        assert Path(str(kwargs["local_dir"])).resolve() == target_dir.resolve()
         return str(model_dir)
 
     monkeypatch.setattr(

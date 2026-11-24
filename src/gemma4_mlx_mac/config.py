@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from .models import DEFAULT_MODEL_ID
@@ -49,11 +50,13 @@ def get_allowed_write_roots() -> tuple[Path, ...]:
         ]
         if roots:
             return tuple(roots)
-    return (
+    candidates = [
         Path.cwd().resolve(),
         Path.home().resolve(),
+        Path(tempfile.gettempdir()).resolve(),
         Path("/tmp").resolve(),
-    )
+    ]
+    return tuple(dict.fromkeys(candidates))
 
 
 def ensure_safe_write_path(target: str | Path, *, label: str = "Path") -> Path:
@@ -64,7 +67,17 @@ def ensure_safe_write_path(target: str | Path, *, label: str = "Path") -> Path:
     if parts & blocked_segments:
         raise ValueError(f"{label} cannot write inside sensitive directory: {resolved}")
 
-    system_prefixes = ("/etc", "/System", "/Library", "/usr", "/bin", "/sbin", "/var/root")
+    system_prefixes = (
+        "/etc",
+        "/private/etc",
+        "/System",
+        "/Library",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/var/root",
+        "/private/var/root",
+    )
     resolved_str = str(resolved)
     for prefix in system_prefixes:
         if resolved_str == prefix or resolved_str.startswith(f"{prefix}/"):
