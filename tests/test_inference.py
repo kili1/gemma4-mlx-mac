@@ -615,3 +615,67 @@ def test_chat_service_prefers_native_mlx_memory_metrics_when_available(monkeypat
     assert status.mlx_active_memory_bytes == 4_000_000
     assert status.mlx_cache_memory_bytes == 500_000
     assert status.mlx_peak_memory_bytes == 4_500_000
+
+
+def test_chat_service_routes_multimodal_requests_through_mlx_vlm_with_thinking(tmp_path) -> None:
+    image_file = tmp_path / "photo.png"
+    audio_file = tmp_path / "clip.wav"
+    image_file.write_bytes(b"fake-png")
+    audio_file.write_bytes(b"fake-wav")
+
+    captured_vlm: dict[str, object] = {}
+
+    class FakeVlmProcessor:
+        def apply_chat_template(
+            self,
+            messages,
+            tokenize: bool = False,
+            add_generation_prompt: bool = True,
+            enable_thinking: bool = False,
+        ) -> str:
+            captured_vlm["messages"] = messages
+            captured_vlm["enable_thinking"] = enable_thinking
+            return "vlm-rendered-prompt"
+
+    def fake_vlm_loader(model_path: str, adapter_path: str | None = None):
+        captured_vlm["loader"] = (model_path, adapter_path)
+        return object(), FakeVlmProcessor(), {"model_type": "gemma4"}
+
+    def fake_vlm_stream(model, processor, prompt, **kwargs):
+        captured_vlm["prompt"] = prompt
+        captured_vlm["kwargs"] = kwargs
+        yield SimpleNamespace(
+            text="<|channel>thought\nInspecting image + audio.<channel|>A diagram and voice memo.",
+            prompt_tokens=12,
+            generation_tokens=6,
+            finish_reason="stop",
+        )
+
+    service = ChatService(
+        model_path_resolver=lambda _id: "/tmp/gemma4",
+        vlm_loader=fake_vlm_loader,
+        vlm_stream_generator=fake_vlm_stream,
+    )
+
+    response = service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[ChatMessage(role="user", content="What is in these?")],
+            images=[str(image_file)],
+            audios=[str(audio_file)],
+            show_thinking=True,
+            temperature=0.3,
+            top_p=0.9,
+        )
+    )
+
+    assert captured_vlm["prompt"] == "vlm-rendered-prompt"
+    assert captured_vlm["enable_thinking"] is True
+    assert captured_vlm["kwargs"]["image"] == [str(image_file)]
+    assert captured_vlm["kwargs"]["audio"] == [str(audio_file)]
+    assert captured_vlm["kwargs"]["temperature"] == 0.3
+    assert captured_vlm["kwargs"]["top_p"] == 0.9
+    assert response["choices"][0]["message"]["content"] == (
+        "Thinking:\nInspecting image + audio.\n\nAnswer:\nA diagram and voice memo."
+    )
+    assert service.memory_status().loaded_models[0].backend == "vlm"

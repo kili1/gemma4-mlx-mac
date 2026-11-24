@@ -7,7 +7,7 @@ import sys
 
 from pydantic import BaseModel, Field
 
-from .mlx_setup import is_mlx_available
+from .mlx_setup import is_mlx_available, is_mlx_vlm_available
 
 
 class SystemInfo(BaseModel):
@@ -19,7 +19,9 @@ class SystemInfo(BaseModel):
     is_macos: bool
     is_apple_silicon: bool
     mlx_installed: bool
+    mlx_vlm_installed: bool = False
     mlx_ready: bool
+    multimodal_ready: bool = False
     recommendations: list[str] = Field(default_factory=list)
 
 
@@ -54,7 +56,9 @@ def collect_system_info() -> SystemInfo:
     is_macos = os_name == "Darwin"
     is_apple_silicon = is_macos and machine == "arm64"
     mlx_installed = is_mlx_available()
+    mlx_vlm_installed = is_mlx_vlm_available()
     mlx_ready = is_apple_silicon and mlx_installed
+    multimodal_ready = is_apple_silicon and mlx_vlm_installed
     recommendations: list[str] = []
 
     if not is_macos:
@@ -65,6 +69,10 @@ def collect_system_info() -> SystemInfo:
         recommendations.append(
             "MLX dependencies are not installed yet. Run `gemma4-mlx-mac install-mlx` "
             "or click Install MLX in the web UI."
+        )
+    elif not mlx_vlm_installed:
+        recommendations.append(
+            "Install `mlx-vlm` via `gemma4-mlx-mac install-mlx` to enable Gemma 4 vision and audio."
         )
 
     if total_memory_gb and total_memory_gb < 16:
@@ -90,7 +98,9 @@ def collect_system_info() -> SystemInfo:
         is_macos=is_macos,
         is_apple_silicon=is_apple_silicon,
         mlx_installed=mlx_installed,
+        mlx_vlm_installed=mlx_vlm_installed,
         mlx_ready=mlx_ready,
+        multimodal_ready=multimodal_ready,
         recommendations=recommendations,
     )
 

@@ -126,9 +126,14 @@ export function ModelMemoryCard({
       {memory && memory.loaded_models.length > 0 && (
         <ul className="loaded-models-list">
           {memory.loaded_models.map((item) => (
-            <li key={`${item.id}-${item.adapter_path ?? "base"}`}>
+            <li key={`${item.id}-${item.adapter_path ?? "base"}-${item.backend ?? "text"}`}>
               <strong>{item.id}</strong>
-              {item.adapter_path && <span className="inline-pill">LoRA: {item.adapter_path}</span>}
+              <div className="badges">
+                <span>{item.backend === "vlm" ? "mlx-vlm" : "mlx-lm"}</span>
+                {item.adapter_path && (
+                  <span className="good">LoRA: {item.adapter_path}</span>
+                )}
+              </div>
               <small>{item.path}</small>
             </li>
           ))}
@@ -154,7 +159,11 @@ export function InferenceSetup({
   return (
     <section className="setup-panel" aria-label="MLX inference setup">
       <div>
-        <strong>MLX inference is not installed</strong>
+        <strong>
+          {status.available
+            ? "Multimodal MLX-VLM is not installed"
+            : "MLX inference is not installed"}
+        </strong>
         <p>{status.message}</p>
         <code>{formatCommand(status.command)}</code>
       </div>

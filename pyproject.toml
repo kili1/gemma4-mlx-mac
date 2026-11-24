@@ -49,9 +49,7 @@ dependencies = [
 [project.optional-dependencies]
 mlx = [
   "mlx>=0.31.2; platform_system == 'Darwin'",
-  "mlx-lm[train]>=0.31.3; platform_system == 'Darwin'"
-]
-vlm = [
+  "mlx-lm[train]>=0.31.3; platform_system == 'Darwin'",
   "mlx-vlm>=0.8.0; platform_system == 'Darwin'"
 ]
 dev = [

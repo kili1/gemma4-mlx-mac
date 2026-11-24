@@ -39,7 +39,7 @@ from .inference import (
     InferenceError,
     InferenceNotReady,
 )
-from .mlx_setup import build_mlx_install_command, is_mlx_available
+from .mlx_setup import build_mlx_install_command, is_mlx_available, is_mlx_vlm_available
 from .models import list_model_profiles
 from .system import collect_system_info
 from .tuning import TuneJobStore, TuneRequest
@@ -73,7 +73,9 @@ def doctor(
     table.add_row("Memory", f"{info.total_memory_gb:g} GB")
     table.add_row("Apple Silicon", "yes" if info.is_apple_silicon else "no")
     table.add_row("MLX installed", "yes" if info.mlx_installed else "no")
+    table.add_row("MLX-VLM (vision/audio)", "yes" if info.mlx_vlm_installed else "no")
     table.add_row("MLX ready", "yes" if info.mlx_ready else "no")
+    table.add_row("Multimodal ready", "yes" if info.multimodal_ready else "no")
     console.print(table)
     for recommendation in info.recommendations:
         console.print(f"- {recommendation}")
@@ -139,8 +141,33 @@ def chat(
     top_p: float = typer.Option(1.0, min=0.01, max=1.0, help="Nucleus sampling top_p."),
     thinking: bool = typer.Option(False, "--thinking", help="Enable native Gemma 4 Thinking Mode."),
     adapter: Path | None = typer.Option(None, "--adapter", help="Optional LoRA adapter directory."),
+    images: list[Path] | None = typer.Option(
+        None,
+        "--image",
+        "-i",
+        exists=True,
+        help="Optional image file(s) for multimodal Gemma 4 vision inference.",
+    ),
+    audios: list[Path] | None = typer.Option(
+        None,
+        "--audio",
+        "-a",
+        exists=True,
+        help="Optional audio file(s) for Gemma 4 any-to-any inference (E2B/E4B/12B).",
+    ),
+    videos: list[Path] | None = typer.Option(
+        None,
+        "--video",
+        exists=True,
+        help="Optional video file(s) for multimodal Gemma 4 inference.",
+    ),
+    stream: bool = typer.Option(
+        False,
+        "--stream",
+        help="Stream generated tokens live to stdout with throughput summary.",
+    ),
 ) -> None:
-    """Send a one-shot chat prompt."""
+    """Send a one-shot text or multimodal (image/audio/video) chat prompt."""
     request = ChatCompletionRequest(
         model=model or get_default_model(),
         messages=[ChatMessage(role="user", content=prompt)],
@@ -149,9 +176,27 @@ def chat(
         top_p=top_p,
         show_thinking=thinking,
         adapter_path=str(adapter) if adapter else None,
+        images=[str(path) for path in (images or [])],
+        audios=[str(path) for path in (audios or [])],
+        videos=[str(path) for path in (videos or [])],
+        stream=stream,
     )
+    service = ChatService()
     try:
-        response = ChatService().create_completion(request)
+        if stream:
+            last_chunk = None
+            for chunk in service.stream_tokens(request):
+                last_chunk = chunk
+                if chunk.text:
+                    console.print(chunk.text, end="", markup=False, highlight=False)
+            console.print()
+            if last_chunk is not None:
+                console.print(
+                    f"[dim]({last_chunk.completion_tokens} tokens, "
+                    f"{last_chunk.tokens_per_second:.1f} tok/s)[/dim]"
+                )
+            return
+        response = service.create_completion(request)
     except (InferenceNotReady, InferenceError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -160,9 +205,9 @@ def chat(
 
 @app.command("install-mlx")
 def install_mlx() -> None:
-    """Install the optional MLX inference dependencies into this Python environment."""
-    if is_mlx_available():
-        console.print("MLX inference dependencies are already installed.")
+    """Install optional MLX text and multimodal (mlx-vlm) dependencies."""
+    if is_mlx_available() and is_mlx_vlm_available():
+        console.print("MLX text and multimodal dependencies are already installed.")
         return
 
     command = build_mlx_install_command()
@@ -174,7 +219,13 @@ def install_mlx() -> None:
     if not is_mlx_available():
         console.print("[red]Install finished, but mlx_lm is still not importable.[/red]")
         raise typer.Exit(1)
-    console.print("MLX inference dependencies are installed.")
+    if not is_mlx_vlm_available():
+        console.print(
+            "[yellow]mlx_lm is installed, but mlx_vlm is not importable; "
+            "vision/audio chat will remain unavailable.[/yellow]"
+        )
+        return
+    console.print("MLX text and multimodal dependencies are installed.")
 
 
 @app.command("models")

@@ -1,19 +1,24 @@
 import React from "react";
 import {
   Activity,
+  FileAudio,
   HardDrive,
+  ImagePlus,
   MessageSquareText,
   RotateCcw,
   Send,
   SlidersHorizontal,
   Square,
+  X,
 } from "lucide-react";
 
 import { fetchJson, readChatStream, readErrorMessage } from "../api";
-import { formatTokensPerSecond, parsePositiveFloat, parsePositiveInt } from "../format";
+import { formatBytes, formatTokensPerSecond, parsePositiveFloat, parsePositiveInt } from "../format";
+import { buildOpenAiContentParts, readFileAsAttachment } from "../media";
 import type {
   ChatTurn,
   InferenceStatus,
+  MediaAttachment,
   MlxInstallJob,
   ModelProfile,
   ModelSource,
@@ -27,6 +32,8 @@ export function ChatPanel() {
   const [modelSource, setModelSource] = React.useState<ModelSource>("downloaded");
   const [modelPath, setModelPath] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
+  const [attachments, setAttachments] = React.useState<MediaAttachment[]>([]);
+  const [isDragOver, setIsDragOver] = React.useState(false);
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [temperatureInput, setTemperatureInput] = React.useState("0.7");
   const [topPInput, setTopPInput] = React.useState("0.95");
@@ -43,6 +50,8 @@ export function ChatPanel() {
   const pollTimerRef = React.useRef<number | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
   const threadEndRef = React.useRef<HTMLDivElement | null>(null);
+  const imageInputRef = React.useRef<HTMLInputElement | null>(null);
+  const audioInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const downloadedModels = models.filter((model) => model.downloaded);
   const selectedDownloadedModel =
@@ -52,6 +61,11 @@ export function ChatPanel() {
   const activeModelLabel =
     modelSource === "path" ? modelPath.trim() || "No model path selected" : activeModel;
   const inferenceReady = inferenceStatus?.available === true;
+  const multimodalReady = inferenceStatus?.multimodal_available === true;
+  const supportsAudio =
+    modelSource === "path" ||
+    !selectedDownloadedModel ||
+    selectedDownloadedModel.modality === "any-to-any";
   const isInstalling =
     installJob?.status === "queued" ||
     installJob?.status === "running" ||
@@ -204,6 +218,78 @@ export function ChatPanel() {
     }
   }
 
+  async function addFiles(fileList: FileList | File[]) {
+    setMessage("");
+    const incoming = Array.from(fileList);
+    if (incoming.length === 0) {
+      return;
+    }
+    const added: MediaAttachment[] = [];
+    for (const file of incoming) {
+      try {
+        const attachment = await readFileAsAttachment(file);
+        if (attachment.kind === "audio" && !supportsAudio) {
+          setMessage(
+            `${selectedDownloadedModel?.label ?? "Selected model"} supports text + image only. Switch to E2B, E4B, or 12B for audio.`,
+          );
+          continue;
+        }
+        added.push(attachment);
+      } catch (error: unknown) {
+        setMessage(error instanceof Error ? error.message : "Could not attach file.");
+      }
+    }
+    if (added.length > 0 && mountedRef.current) {
+      setAttachments((prev) => [...prev, ...added]);
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((item) => item.id !== id));
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = event.clipboardData?.items;
+    if (!items) {
+      return;
+    }
+    const mediaFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === "file" && (item.type.startsWith("image/") || item.type.startsWith("audio/"))) {
+        const file = item.getAsFile();
+        if (file) {
+          mediaFiles.push(file);
+        }
+      }
+    }
+    if (mediaFiles.length > 0) {
+      event.preventDefault();
+      addFiles(mediaFiles);
+    }
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLElement>) {
+    event.preventDefault();
+    if (!isDragOver) {
+      setIsDragOver(true);
+    }
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLElement>) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      return;
+    }
+    setIsDragOver(false);
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLElement>) {
+    event.preventDefault();
+    setIsDragOver(false);
+    if (event.dataTransfer?.files?.length) {
+      addFiles(event.dataTransfer.files);
+    }
+  }
+
   function chooseModelSource(source: ModelSource) {
     setModelSource(source);
     if (source === "path" && !modelPath && selectedDownloadedModel?.local_path) {
@@ -227,13 +313,23 @@ export function ChatPanel() {
   function clearConversation() {
     abortRef.current?.abort();
     setTurns([]);
+    setAttachments([]);
     setMessage("");
   }
 
   async function sendPrompt() {
     const content = prompt.trim();
+    const pendingAttachments = [...attachments];
+    const hasMedia = pendingAttachments.length > 0;
+
     if (!inferenceReady) {
       setMessage("Install MLX inference before chatting.");
+      return;
+    }
+    if (hasMedia && !multimodalReady) {
+      setMessage(
+        "Image and audio chat require `mlx-vlm`. Click Install MLX or run `gemma4-mlx-mac install-mlx`.",
+      );
       return;
     }
     if (!activeModel) {
@@ -244,10 +340,16 @@ export function ChatPanel() {
       );
       return;
     }
-    if (!content) {
-      setMessage("Enter a prompt first.");
+    if (!content && !hasMedia) {
+      setMessage("Enter a prompt or attach an image/audio file first.");
       return;
     }
+
+    const effectivePrompt =
+      content ||
+      (pendingAttachments.some((item) => item.kind === "audio")
+        ? "Listen to the attached audio and describe or transcribe it."
+        : "Describe the attached image.");
 
     const temperature = parsePositiveFloat(temperatureInput, 0.7, 0, 2);
     const topP = parsePositiveFloat(topPInput, 0.95, 0.05, 1);
@@ -255,16 +357,25 @@ export function ChatPanel() {
 
     const userTurnId = `user-${Date.now()}`;
     const assistantTurnId = `assistant-${Date.now()}`;
-    const historyMessages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+    const historyMessages: Array<{
+      role: "system" | "user" | "assistant";
+      content: string | Array<Record<string, unknown>>;
+    }> = [];
     if (systemPrompt.trim()) {
       historyMessages.push({ role: "system", content: systemPrompt.trim() });
     }
     for (const turn of turns) {
-      if (turn.content.trim()) {
-        historyMessages.push({ role: turn.role, content: turn.content });
+      if (turn.content.trim() || (turn.attachments && turn.attachments.length > 0)) {
+        historyMessages.push({
+          role: turn.role,
+          content: buildOpenAiContentParts(turn.content, turn.attachments),
+        });
       }
     }
-    historyMessages.push({ role: "user", content });
+    historyMessages.push({
+      role: "user",
+      content: buildOpenAiContentParts(effectivePrompt, pendingAttachments),
+    });
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -272,9 +383,15 @@ export function ChatPanel() {
     setIsSending(true);
     setMessage("");
     setPrompt("");
+    setAttachments([]);
     setTurns((prev) => [
       ...prev,
-      { id: userTurnId, role: "user", content },
+      {
+        id: userTurnId,
+        role: "user",
+        content: effectivePrompt,
+        attachments: pendingAttachments.length > 0 ? pendingAttachments : undefined,
+      },
       {
         id: assistantTurnId,
         role: "assistant",
@@ -354,8 +471,8 @@ export function ChatPanel() {
       } else {
         setMessage(error instanceof Error ? error.message : "Chat request failed.");
         if (!receivedAnyToken) {
-          // Restore the prompt and remove the failed empty exchange so the user doesn't lose text.
           setPrompt(content);
+          setAttachments(pendingAttachments);
           setTurns((prev) =>
             prev.filter((turn) => turn.id !== userTurnId && turn.id !== assistantTurnId),
           );
@@ -381,13 +498,15 @@ export function ChatPanel() {
 
   const showNoModelsHint =
     modelSource === "downloaded" && models.length > 0 && downloadedModels.length === 0;
+  const needsMlxInstall = inferenceStatus && (!inferenceReady || !multimodalReady);
 
   return (
     <>
-      <PageHeader title="Chat" eyebrow="Local inference">
+      <PageHeader title="Chat" eyebrow="Local text, vision & audio inference">
         {inferenceStatus?.active_adapter && (
           <StatusBadge tone="good">Adapter: {inferenceStatus.active_adapter}</StatusBadge>
         )}
+        {multimodalReady && <StatusBadge tone="good">Vision + Audio</StatusBadge>}
         <StatusBadge tone={inferenceReady ? "good" : "warn"}>
           {inferenceReady ? "MLX ready" : "MLX setup"}
         </StatusBadge>
@@ -405,7 +524,13 @@ export function ChatPanel() {
       </PageHeader>
 
       <div className="chat-layout">
-        <section className="conversation-panel" aria-label="Conversation">
+        <section
+          className={`conversation-panel${isDragOver ? " drag-over" : ""}`}
+          aria-label="Conversation"
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           {message && <p className="notice">{message}</p>}
           {!message && showNoModelsHint && (
             <p className="notice">
@@ -417,15 +542,39 @@ export function ChatPanel() {
               <div className="empty-state">
                 <MessageSquareText size={28} />
                 <strong>Ready</strong>
-                <small>Multi-turn local chat. Press Enter to send, Shift+Enter for newline.</small>
+                <small>
+                  Multi-turn local chat with Gemma 4. Drop or paste images/audio, press Enter to
+                  send, Shift+Enter for newline.
+                </small>
               </div>
             )}
             {turns.map((turn, idx) => {
-              const isStreamingTurn = isSending && idx === turns.length - 1 && turn.role === "assistant";
+              const isStreamingTurn =
+                isSending && idx === turns.length - 1 && turn.role === "assistant";
               if (turn.role === "user") {
                 return (
                   <article className="message user-message" key={turn.id}>
                     <span>User</span>
+                    {turn.attachments && turn.attachments.length > 0 && (
+                      <div className="turn-attachments">
+                        {turn.attachments.map((item) =>
+                          item.kind === "image" ? (
+                            <img
+                              key={item.id}
+                              src={item.dataUrl}
+                              alt={item.name}
+                              className="turn-image-preview"
+                            />
+                          ) : (
+                            <div key={item.id} className="turn-audio-chip">
+                              <FileAudio size={15} />
+                              <span>{item.name}</span>
+                              <audio controls src={item.dataUrl} preload="metadata" />
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    )}
                     <p>{turn.content}</p>
                   </article>
                 );
@@ -433,9 +582,7 @@ export function ChatPanel() {
               return (
                 <article className="message assistant-message" key={turn.id}>
                   <div className="message-meta">
-                    <span>
-                      Gemma{turn.stopped ? " (stopped)" : ""}
-                    </span>
+                    <span>Gemma{turn.stopped ? " (stopped)" : ""}</span>
                     {turn.stats && (
                       <div className="generation-stats">
                         <span>{turn.stats.completionTokens} tokens</span>
@@ -457,14 +604,94 @@ export function ChatPanel() {
           </div>
 
           <div className="composer">
+            {attachments.length > 0 && (
+              <div className="attachment-tray" aria-label="Attached media">
+                {attachments.map((item) => (
+                  <div className="attachment-chip" key={item.id}>
+                    {item.kind === "image" ? (
+                      <img src={item.dataUrl} alt={item.name} className="attachment-thumb" />
+                    ) : (
+                      <FileAudio size={18} />
+                    )}
+                    <div className="attachment-meta">
+                      <strong>{item.name}</strong>
+                      <small>{formatBytes(item.sizeBytes)}</small>
+                    </div>
+                    <button
+                      type="button"
+                      className="attachment-remove"
+                      onClick={() => removeAttachment(item.id)}
+                      aria-label={`Remove ${item.name}`}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(event) => {
+                if (event.target.files) {
+                  addFiles(event.target.files);
+                }
+                event.target.value = "";
+              }}
+            />
+            <input
+              ref={audioInputRef}
+              type="file"
+              accept="audio/*"
+              multiple
+              hidden
+              onChange={(event) => {
+                if (event.target.files) {
+                  addFiles(event.target.files);
+                }
+                event.target.value = "";
+              }}
+            />
+
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={handleComposerKeyDown}
-              placeholder="Ask Gemma 4 something... (Enter to send, Shift+Enter for newline)"
+              onPaste={handlePaste}
+              placeholder="Ask Gemma 4 anything, or paste/drop an image or audio clip..."
             />
             <div className="chat-actions">
-              <span>{activeModelLabel}</span>
+              <div className="composer-left">
+                <button
+                  type="button"
+                  className="secondary compact-button"
+                  disabled={isSending}
+                  onClick={() => imageInputRef.current?.click()}
+                  title="Attach image (or paste/drop)"
+                >
+                  <ImagePlus size={16} />
+                  <span>Image</span>
+                </button>
+                <button
+                  type="button"
+                  className="secondary compact-button"
+                  disabled={isSending || !supportsAudio}
+                  onClick={() => audioInputRef.current?.click()}
+                  title={
+                    supportsAudio
+                      ? "Attach audio clip (E2B/E4B/12B any-to-any)"
+                      : "Audio requires an any-to-any Gemma 4 model (E2B, E4B, or 12B)"
+                  }
+                >
+                  <FileAudio size={16} />
+                  <span>Audio</span>
+                </button>
+                <span className="active-model-label">{activeModelLabel}</span>
+              </div>
               <div className="action-buttons">
                 {isSending && (
                   <button
@@ -640,7 +867,7 @@ export function ChatPanel() {
               </label>
             </div>
 
-            {inferenceStatus && !inferenceReady && (
+            {needsMlxInstall && (
               <InferenceSetup
                 status={inferenceStatus}
                 job={installJob}

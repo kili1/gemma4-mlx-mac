@@ -43,6 +43,7 @@ def test_cli_download_command(monkeypatch) -> None:
 
 def test_cli_install_mlx_already_available(monkeypatch) -> None:
     monkeypatch.setattr(cli, "is_mlx_available", lambda: True)
+    monkeypatch.setattr(cli, "is_mlx_vlm_available", lambda: True)
 
     result = runner.invoke(app, ["install-mlx"])
 
@@ -96,3 +97,28 @@ def test_cli_doctor_reports_mlx_installed_and_ready() -> None:
     assert result.exit_code == 0
     assert '"mlx_installed"' in result.output
     assert '"mlx_ready"' in result.output
+    assert '"multimodal_ready"' in result.output
+
+
+def test_cli_chat_passes_multimodal_images_and_audio(monkeypatch, tmp_path) -> None:
+    img = tmp_path / "shot.png"
+    clip = tmp_path / "voice.wav"
+    img.write_bytes(b"png")
+    clip.write_bytes(b"wav")
+    captured: list[object] = []
+
+    def fake_create_completion(self, request):
+        captured.append(request)
+        return {"choices": [{"message": {"content": "Saw image and heard audio."}}]}
+
+    monkeypatch.setattr(cli.ChatService, "create_completion", fake_create_completion)
+
+    result = runner.invoke(
+        app,
+        ["chat", "Describe both", "--image", str(img), "--audio", str(clip)],
+    )
+
+    assert result.exit_code == 0
+    assert "Saw image and heard audio." in result.output
+    assert captured[0].images == [str(img)]
+    assert captured[0].audios == [str(clip)]

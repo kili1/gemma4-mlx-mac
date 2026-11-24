@@ -57,12 +57,24 @@ export function SystemPanel() {
         <MetricCard label="Memory" value={system ? `${system.total_memory_gb} GB` : "Loading"} />
         <MetricCard label="Python" value={system?.python_version ?? "Loading"} />
         <MetricCard
-          label="MLX"
+          label="MLX Text"
           value={
             system
               ? system.mlx_ready
                 ? "Ready (Apple Silicon)"
                 : system.mlx_installed
+                  ? "Installed (non-Apple Silicon)"
+                  : "Not installed"
+              : "Loading"
+          }
+        />
+        <MetricCard
+          label="Vision & Audio (MLX-VLM)"
+          value={
+            system
+              ? system.multimodal_ready
+                ? "Ready (Apple Silicon)"
+                : system.mlx_vlm_installed
                   ? "Installed (non-Apple Silicon)"
                   : "Not installed"
               : "Loading"
