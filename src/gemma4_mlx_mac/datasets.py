@@ -6,7 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .config import ensure_safe_write_path
+
 DatasetFormat = Literal["chat", "completion", "text"]
+_ALLOWED_CHAT_ROLES = {"system", "developer", "user", "assistant", "tool"}
 
 
 class DatasetFileReport(BaseModel):
@@ -39,18 +42,42 @@ class SyntheticDatasetRequest(BaseModel):
 class SyntheticDatasetResult(BaseModel):
     data_path: str
     train_path: str
+    valid_path: str | None = None
     format: DatasetFormat
     examples: int
     report: DatasetReport
 
 
 def detect_record_format(record: dict) -> DatasetFormat:
-    if isinstance(record.get("messages"), list):
+    if "messages" in record:
+        messages = record["messages"]
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("Chat record 'messages' must be a non-empty list.")
+        for idx, message in enumerate(messages):
+            if not isinstance(message, dict):
+                raise ValueError(f"Chat message at index {idx} must be a JSON object.")
+            role = message.get("role")
+            if not isinstance(role, str) or role not in _ALLOWED_CHAT_ROLES:
+                raise ValueError(
+                    f"Chat message at index {idx} has invalid role {role!r}."
+                )
+            content = message.get("content")
+            if not isinstance(content, str | list):
+                raise ValueError(
+                    f"Chat message at index {idx} must include string or content-part list."
+                )
         return "chat"
+
     if "prompt" in record and "completion" in record:
+        if not isinstance(record["prompt"], str) or not isinstance(record["completion"], str):
+            raise ValueError("Completion record 'prompt' and 'completion' must be strings.")
         return "completion"
-    if isinstance(record.get("text"), str):
+
+    if "text" in record:
+        if not isinstance(record["text"], str) or not record["text"].strip():
+            raise ValueError("Text record 'text' must be a non-empty string.")
         return "text"
+
     raise ValueError("Expected a chat, completion, or text JSONL record.")
 
 
@@ -75,8 +102,17 @@ def validate_jsonl_file(path: str | Path) -> DatasetFileReport:
                 raise ValueError(f"{file_path}:{line_number} is not valid JSON.") from exc
             if not isinstance(record, dict):
                 raise ValueError(f"{file_path}:{line_number} must be a JSON object.")
-            record_format = detect_record_format(record)
-            detected_format = detected_format or record_format
+            try:
+                record_format = detect_record_format(record)
+            except ValueError as exc:
+                raise ValueError(f"{file_path}:{line_number}: {exc}") from exc
+            if detected_format is None:
+                detected_format = record_format
+            elif record_format != detected_format:
+                raise ValueError(
+                    f"{file_path}:{line_number} mixes format '{record_format}' with "
+                    f"'{detected_format}'. Keep one consistent JSONL schema per file."
+                )
             examples += 1
 
     if examples == 0 or detected_format is None:
@@ -90,7 +126,7 @@ def validate_jsonl_file(path: str | Path) -> DatasetFileReport:
 
 
 def validate_dataset_dir(path: str | Path) -> DatasetReport:
-    data_path = Path(path)
+    data_path = Path(path).expanduser()
     if data_path.is_file():
         return DatasetReport(data_path=str(data_path), files=[validate_jsonl_file(data_path)])
 
@@ -108,18 +144,29 @@ def validate_dataset_dir(path: str | Path) -> DatasetReport:
 
 
 def create_synthetic_dataset(request: SyntheticDatasetRequest) -> SyntheticDatasetResult:
-    output_dir = Path(request.output_dir).expanduser()
+    output_dir = ensure_safe_write_path(
+        request.output_dir,
+        label="Synthetic dataset output directory",
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     train_path = output_dir / "train.jsonl"
+    valid_path = output_dir / "valid.jsonl"
 
     with train_path.open("w", encoding="utf-8") as handle:
         for index in range(request.examples):
             handle.write(f"{json.dumps(_synthetic_record(request, index))}\n")
 
+    valid_count = max(1, min(4, request.examples // 5 or 1))
+    with valid_path.open("w", encoding="utf-8") as handle:
+        for offset in range(valid_count):
+            record = _synthetic_record(request, request.examples + offset)
+            handle.write(f"{json.dumps(record)}\n")
+
     report = validate_dataset_dir(output_dir)
     return SyntheticDatasetResult(
         data_path=str(output_dir),
         train_path=str(train_path),
+        valid_path=str(valid_path),
         format=request.format,
         examples=request.examples,
         report=report,

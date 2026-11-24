@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from threading import Event
 from time import sleep
 
@@ -13,6 +14,8 @@ from gemma4_mlx_mac.tuning import (
     build_lora_command,
     parse_mlx_lora_line,
 )
+
+EXAMPLES_DATA = str(Path(__file__).resolve().parents[1] / "examples" / "data")
 
 
 def test_parse_mlx_lora_train_and_val_lines() -> None:
@@ -58,6 +61,7 @@ def test_build_lora_command_includes_flags(tmp_path) -> None:
     assert "--adapter-path" in cmd and str(adapter_dir) in cmd
     assert "--num-layers" in cmd and "8" in cmd
     assert "--grad-checkpoint" in cmd
+    assert "--val-batches" in cmd and "0" in cmd
 
 
 def test_tune_job_store_runs_mlx_lora_and_tracks_metrics(tmp_path) -> None:
@@ -81,7 +85,7 @@ def test_tune_job_store_runs_mlx_lora_and_tracks_metrics(tmp_path) -> None:
     job = store.create(
         TuneRequest(
             model=DEFAULT_MODEL_ID,
-            data_path="examples/data",
+            data_path=EXAMPLES_DATA,
             adapter_name="my-adapter",
             iters=10,
         )
@@ -117,7 +121,7 @@ def test_tune_job_store_fails_cleanly_when_mlx_missing(tmp_path) -> None:
     job = store.create(
         TuneRequest(
             model=DEFAULT_MODEL_ID,
-            data_path="examples/data",
+            data_path=EXAMPLES_DATA,
             adapter_name="demo",
             iters=5,
         )
@@ -156,7 +160,7 @@ def test_tune_job_store_supports_cancellation(tmp_path) -> None:
     job = store.create(
         TuneRequest(
             model=DEFAULT_MODEL_ID,
-            data_path="examples/data",
+            data_path=EXAMPLES_DATA,
             adapter_name="cancel-me",
             iters=10,
         )
@@ -232,7 +236,7 @@ def test_real_subprocess_runner_terminates_cleanly_on_cancel(tmp_path) -> None:
     job = store.create(
         TuneRequest(
             model=DEFAULT_MODEL_ID,
-            data_path="examples/data",
+            data_path=EXAMPLES_DATA,
             adapter_name="real-cancel",
             iters=10,
         )
@@ -252,7 +256,7 @@ def test_tune_job_store_handles_nonzero_exit_code(tmp_path) -> None:
     job = store.create(
         TuneRequest(
             model=DEFAULT_MODEL_ID,
-            data_path="examples/data",
+            data_path=EXAMPLES_DATA,
             adapter_name="oom-run",
             iters=5,
         )

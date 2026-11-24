@@ -22,3 +22,8 @@ def test_12b_and_26b_qat_profiles_are_present() -> None:
     assert profile_26b is not None
     assert profile_26b.recommended_memory_gb <= 32
     assert profile_26b.qat is True
+
+
+def test_bf16_profiles_use_canonical_lowercase_repo_ids() -> None:
+    assert get_model_profile("mlx-community/gemma-4-26b-a4b-it-bf16") is not None
+    assert get_model_profile("mlx-community/gemma-4-31b-it-bf16") is not None

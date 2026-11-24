@@ -120,9 +120,11 @@ The backend exposes:
 - `POST /api/models/download`
 - `GET /api/models/download/{job_id}`
 - `GET /api/models/downloads`
+- `POST /api/models/unload`
 - `GET /api/inference/status`
 - `POST /api/inference/install`
 - `GET /api/inference/install/{job_id}`
+- `GET /v1/models`
 - `POST /v1/chat/completions`
 - `GET /api/tunes`
 - `POST /api/tunes`
@@ -139,7 +141,7 @@ Non-streaming chat:
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-community/gemma-4-e2b-it-4bit",
+    "model": "mlx-community/gemma-4-E2B-it-qat-4bit",
     "messages": [{"role": "user", "content": "Say hello."}],
     "max_tokens": 64
   }'
@@ -151,7 +153,7 @@ Streaming chat with token metrics:
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mlx-community/gemma-4-e2b-it-4bit",
+    "model": "mlx-community/gemma-4-E2B-it-qat-4bit",
     "messages": [{"role": "user", "content": "Say hello."}],
     "max_tokens": 64,
     "stream": true
@@ -193,11 +195,12 @@ uv run --extra dev ruff check .
 uv run --extra dev pytest
 ```
 
-Build the frontend into the Python package:
+Build and test the frontend into the Python package:
 
 ```bash
 cd frontend
 npm install
+npm test
 npm run build
 ```
 

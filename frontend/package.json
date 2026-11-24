@@ -5,19 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc",
+    "test": "node --test src/*.test.ts",
     "build": "tsc && vite build --outDir ../src/gemma4_mlx_mac/web --emptyOutDir",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.2.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "typescript": "^5.5.4",
-    "vite": "^8.0.12"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0"
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "typescript": "^5.5.4",
+    "vite": "^8.0.12"
   }
 }

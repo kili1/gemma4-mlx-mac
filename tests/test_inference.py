@@ -475,3 +475,143 @@ def test_chat_service_rejects_missing_explicit_adapter_path() -> None:
         assert "Adapter path does not exist" in str(exc)
     else:
         raise AssertionError("Expected missing explicit adapter_path to raise InferenceNotReady.")
+
+
+def test_chat_service_evicts_old_model_to_bound_unified_memory(monkeypatch) -> None:
+    release_calls = 0
+
+    def fake_release() -> None:
+        nonlocal release_calls
+        release_calls += 1
+
+    monkeypatch.setattr(inference, "_release_mlx_memory", fake_release)
+    service = ChatService(
+        model_loader=lambda model_path: (object(), FakeTokenizer()),
+        stream_generator=lambda *_a, **_kw: [SimpleNamespace(text="ok")],
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda model_id: f"/tmp/{model_id}",
+        max_loaded_models=1,
+    )
+
+    service.create_completion(
+        ChatCompletionRequest(
+            model="model-a",
+            messages=[ChatMessage(role="user", content="1")],
+        )
+    )
+    service.create_completion(
+        ChatCompletionRequest(
+            model="model-b",
+            messages=[ChatMessage(role="user", content="2")],
+        )
+    )
+
+    memory = service.memory_status()
+    assert memory.loaded_count == 1
+    assert memory.loaded_models[0].id == "model-b"
+    assert release_calls == 1
+
+    assert service.unload_models() == 1
+    assert service.memory_status().loaded is False
+    assert release_calls == 2
+
+
+def test_chat_service_serializes_concurrent_generation_calls() -> None:
+    from threading import Thread
+    from time import sleep
+
+    active = 0
+    max_concurrent = 0
+
+    def slow_stream_generate(*_args, **_kwargs):
+        nonlocal active, max_concurrent
+        active += 1
+        max_concurrent = max(max_concurrent, active)
+        sleep(0.05)
+        yield SimpleNamespace(text="done", prompt_tokens=1, generation_tokens=1)
+        active -= 1
+
+    service = ChatService(
+        model_loader=lambda _path: (object(), FakeTokenizer()),
+        stream_generator=slow_stream_generate,
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _id: "/tmp/gemma",
+    )
+
+    req = ChatCompletionRequest(
+        model=DEFAULT_MODEL_ID,
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+    threads = [Thread(target=service.create_completion, args=(req,)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert max_concurrent == 1
+
+
+def test_chat_service_supports_stop_sequences_top_p_and_content_parts() -> None:
+    tokenizer = FakeTokenizer()
+    captured_sampler: list[tuple[float, float]] = []
+
+    def sampler_with_top_p(temp: float = 0.0, top_p: float = 1.0):
+        captured_sampler.append((temp, top_p))
+        return ("sampler", temp, top_p)
+
+    def fake_stream(*_args, **_kwargs):
+        yield SimpleNamespace(text="Hello wor", prompt_tokens=3, generation_tokens=1)
+        yield SimpleNamespace(text="ldST", prompt_tokens=3, generation_tokens=2)
+        yield SimpleNamespace(text="OP trailing", prompt_tokens=3, generation_tokens=3)
+
+    service = ChatService(
+        model_loader=lambda _path: (object(), tokenizer),
+        stream_generator=fake_stream,
+        sampler_factory=sampler_with_top_p,
+        model_path_resolver=lambda _id: "/tmp/gemma",
+    )
+
+    response = service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[
+                ChatMessage(role="system", content="Rule 1."),
+                ChatMessage(role="system", content="Rule 2."),
+                ChatMessage(role="user", content=[{"type": "text", "text": "Say hello"}]),
+            ],
+            temperature=0.4,
+            top_p=0.9,
+            stop=["STOP"],
+        )
+    )
+
+    assert response["choices"][0]["message"]["content"] == "Hello world"
+    assert response["choices"][0]["finish_reason"] == "stop"
+    assert captured_sampler == [(0.4, 0.9)]
+    # Consecutive leading system messages must be merged for Gemma 4 chat template compatibility.
+    assert tokenizer.messages == [
+        {"role": "system", "content": "Rule 1.\n\nRule 2."},
+        {"role": "user", "content": "Say hello"},
+    ]
+
+
+def test_chat_service_prefers_native_mlx_memory_metrics_when_available(monkeypatch) -> None:
+    monkeypatch.setattr(inference, "_mlx_memory_bytes", lambda: (4_000_000, 500_000, 4_500_000))
+    service = ChatService(
+        model_loader=lambda _path: (object(), FakeTokenizer()),
+        stream_generator=lambda *_a, **_kw: [SimpleNamespace(text="ok")],
+        sampler_factory=lambda temp: ("sampler", temp),
+        model_path_resolver=lambda _id: "/tmp/gemma",
+    )
+    service.create_completion(
+        ChatCompletionRequest(
+            model=DEFAULT_MODEL_ID,
+            messages=[ChatMessage(role="user", content="hi")],
+        )
+    )
+
+    status = service.memory_status()
+    assert status.model_memory_bytes == 4_000_000
+    assert status.mlx_active_memory_bytes == 4_000_000
+    assert status.mlx_cache_memory_bytes == 500_000
+    assert status.mlx_peak_memory_bytes == 4_500_000

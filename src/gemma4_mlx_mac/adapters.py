@@ -51,6 +51,8 @@ class AdapterRegistry:
 
     def activate(self, adapter_id: str) -> AdapterInfo:
         path = self.adapter_path(adapter_id)
+        if not path.is_dir():
+            raise FileNotFoundError(f"Adapter directory does not exist: {path.name}")
         with self._lock:
             self._active_adapter = path.name
             return AdapterInfo(

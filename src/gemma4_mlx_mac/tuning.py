@@ -145,6 +145,8 @@ def build_lora_command(
         command.extend(["--num-layers", str(request.num_layers)])
     if request.grad_checkpoint:
         command.append("--grad-checkpoint")
+    if not (data_dir / "valid.jsonl").exists():
+        command.extend(["--val-batches", "0"])
     return command
 
 
@@ -199,7 +201,8 @@ class TuneJobStore:
         self._jobs: dict[str, TuneJob] = {}
         self._cancelled: set[str] = set()
         self._processes: dict[str, subprocess.Popen[str]] = {}
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._max_workers = max_workers
+        self._executor: ThreadPoolExecutor | None = None
         self._lock = Lock()
         self._adapter_registry = adapter_registry or AdapterRegistry()
         self._command_runner = command_runner or _default_command_runner
@@ -232,7 +235,8 @@ class TuneJobStore:
         )
         with self._lock:
             self._jobs[job.id] = job
-        self._executor.submit(self._run, job.id, adapter_dir, command)
+            executor = self._ensure_executor()
+        executor.submit(self._run, job.id, adapter_dir, command)
         return job
 
     def get(self, job_id: str) -> TuneJob | None:
@@ -242,6 +246,24 @@ class TuneJobStore:
     def list(self) -> list[TuneJob]:
         with self._lock:
             return list(self._jobs.values())
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        return self._executor
+
+    def shutdown(self) -> None:
+        with self._lock:
+            processes = list(self._processes.values())
+            executor = self._executor
+            self._executor = None
+            for job_id, job in self._jobs.items():
+                if job.status in {"queued", "running"}:
+                    self._cancelled.add(job_id)
+        for process in processes:
+            _terminate_process(process)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def cancel(self, job_id: str) -> TuneJob | None:
         process: subprocess.Popen[str] | None = None

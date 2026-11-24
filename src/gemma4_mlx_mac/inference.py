@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import gc
 import inspect
 import os
 import re
 import subprocess
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -28,16 +30,32 @@ _STRIP_THOUGHTS_RE = re.compile(
 
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: str
+    role: Literal["system", "developer", "user", "assistant", "tool"]
+    content: str | list[dict[str, Any]]
+
+    def text_content(self) -> str:
+        if isinstance(self.content, str):
+            return self.content
+        parts: list[str] = []
+        for item in self.content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
 
 
 class ChatCompletionRequest(BaseModel):
     model: str = DEFAULT_MODEL_ID
-    messages: list[ChatMessage]
+    messages: list[ChatMessage] = Field(min_length=1)
     max_tokens: int = Field(default=512, ge=1)
     temperature: float = Field(default=0.7, ge=0)
+    top_p: float = Field(default=1.0, gt=0, le=1.0)
+    stop: str | list[str] | None = None
+    seed: int | None = None
+    repetition_penalty: float | None = Field(default=None, ge=0.5, le=2.0)
     stream: bool = False
+    stream_options: dict[str, Any] | None = None
     show_thinking: bool = False
     adapter_path: str | None = None
 
@@ -56,6 +74,13 @@ class ChatCompletionRequest(BaseModel):
             return None
         cleaned = value.strip()
         return str(Path(cleaned).expanduser()) if cleaned else None
+
+    def stop_sequences(self) -> list[str]:
+        if self.stop is None:
+            return []
+        if isinstance(self.stop, str):
+            return [self.stop] if self.stop else []
+        return [item for item in self.stop if item]
 
 
 class InferenceNotReady(RuntimeError):
@@ -98,12 +123,15 @@ class ModelMemoryStatus(BaseModel):
     process_memory_bytes: int | None
     baseline_memory_bytes: int | None
     model_memory_bytes: int | None
+    mlx_active_memory_bytes: int | None = None
+    mlx_cache_memory_bytes: int | None = None
+    mlx_peak_memory_bytes: int | None = None
     note: str
 
 
 ModelLoader = Callable[..., tuple[Any, Any]]
 StreamGenerator = Callable[..., Iterable[Any]]
-SamplerFactory = Callable[[float], Callable[..., Any]]
+SamplerFactory = Callable[..., Callable[..., Any]]
 ModelPathResolver = Callable[[str], str | None]
 ActiveAdapterResolver = Callable[[], str | None]
 
@@ -116,15 +144,27 @@ class ChatService:
         sampler_factory: SamplerFactory | None = None,
         model_path_resolver: ModelPathResolver = get_cached_model_path,
         active_adapter_resolver: ActiveAdapterResolver | None = None,
+        max_loaded_models: int = 1,
     ) -> None:
         self._model_loader = model_loader
         self._stream_generator = stream_generator
         self._sampler_factory = sampler_factory
         self._model_path_resolver = model_path_resolver
         self._active_adapter_resolver = active_adapter_resolver
-        self._loaded_models: dict[tuple[str, str | None], LoadedChatModel] = {}
+        self._max_loaded_models = max(1, max_loaded_models)
+        self._loaded_models: OrderedDict[tuple[str, str | None], LoadedChatModel] = OrderedDict()
         self._baseline_memory_bytes = _process_resident_memory_bytes()
         self._lock = RLock()
+        self._generate_lock = Lock()
+
+    def prepare_request(self, request: ChatCompletionRequest) -> LoadedChatModel:
+        """Validates paths and loads the requested model+adapter before streaming begins."""
+        adapter_path = self._resolve_adapter_path(request.adapter_path)
+        return self._load_model(request.model, adapter_path=adapter_path)
+
+    def preload(self, model_id: str, adapter_path: str | None = None) -> LoadedChatModel:
+        resolved_adapter = self._resolve_adapter_path(adapter_path)
+        return self._load_model(model_id, adapter_path=resolved_adapter)
 
     def create_completion(self, request: ChatCompletionRequest) -> dict:
         text_parts: list[str] = []
@@ -166,8 +206,7 @@ class ChatService:
         }
 
     def stream_tokens(self, request: ChatCompletionRequest) -> Iterable[GeneratedToken]:
-        adapter_path = self._resolve_adapter_path(request.adapter_path)
-        loaded = self._load_model(request.model, adapter_path=adapter_path)
+        loaded = self.prepare_request(request)
         prompt = _render_prompt(
             loaded.tokenizer,
             _messages_for_request(request),
@@ -175,52 +214,68 @@ class ChatService:
         )
         parser = _GemmaThoughtStreamParser()
         formatter = _ThinkingOutputFormatter(show_thinking=request.show_thinking)
+        stop_filter = _StopSequenceFilter(request.stop_sequences())
         started_at = time.monotonic()
         completion_tokens = 0
         prompt_tokens = 0
 
-        try:
-            for raw_chunk in self._stream_completion(loaded, prompt, request):
-                raw_text = str(getattr(raw_chunk, "text", raw_chunk))
-                segments = parser.feed(raw_text)
-                emitted = formatter.format_segments(segments)
-                prompt_tokens = int(getattr(raw_chunk, "prompt_tokens", prompt_tokens) or 0)
-                reported_tokens = int(getattr(raw_chunk, "generation_tokens", 0) or 0)
-                if reported_tokens > completion_tokens:
-                    completion_tokens = reported_tokens
-                elif emitted:
-                    completion_tokens += 1
-                elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
-                finish_reason = getattr(raw_chunk, "finish_reason", None)
-                if emitted or finish_reason is not None:
-                    yield GeneratedToken(
-                        text=emitted,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        elapsed_seconds=elapsed_seconds,
-                        tokens_per_second=completion_tokens / elapsed_seconds,
-                        finish_reason=finish_reason,
-                        is_thinking=formatter.last_was_thinking,
+        # Serialize Metal/MLX generation calls so concurrent HTTP requests never collide on GPU.
+        with self._generate_lock:
+            try:
+                stopped_early = False
+                for raw_chunk in self._stream_completion(loaded, prompt, request):
+                    raw_text = str(getattr(raw_chunk, "text", raw_chunk))
+                    segments = parser.feed(raw_text)
+                    emitted = formatter.format_segments(segments)
+                    emitted, matched_stop = stop_filter.feed(emitted)
+                    prompt_tokens = int(getattr(raw_chunk, "prompt_tokens", prompt_tokens) or 0)
+                    reported_tokens = int(getattr(raw_chunk, "generation_tokens", 0) or 0)
+                    if reported_tokens > completion_tokens:
+                        completion_tokens = reported_tokens
+                    elif emitted:
+                        completion_tokens += 1
+                    elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
+                    finish_reason = (
+                        "stop" if matched_stop else getattr(raw_chunk, "finish_reason", None)
                     )
+                    if emitted or finish_reason is not None:
+                        yield GeneratedToken(
+                            text=emitted,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            elapsed_seconds=elapsed_seconds,
+                            tokens_per_second=completion_tokens / elapsed_seconds,
+                            finish_reason=finish_reason,
+                            is_thinking=formatter.last_was_thinking,
+                        )
+                    if matched_stop:
+                        stopped_early = True
+                        break
 
-            tail_text = formatter.format_segments(parser.flush()) + formatter.flush()
-            if tail_text:
-                elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
-                yield GeneratedToken(
-                    text=tail_text,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    elapsed_seconds=elapsed_seconds,
-                    tokens_per_second=completion_tokens / elapsed_seconds,
-                    is_thinking=formatter.last_was_thinking,
-                )
-        except InferenceNotReady:
-            raise
-        except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
-            raise InferenceError(f"MLX generation failed: {exc}") from exc
+                if not stopped_early:
+                    tail_raw = formatter.format_segments(parser.flush()) + formatter.flush()
+                    tail_emitted, matched_stop = stop_filter.feed(tail_raw)
+                    if not matched_stop:
+                        tail_emitted += stop_filter.flush()
+                    if tail_emitted or matched_stop:
+                        elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
+                        yield GeneratedToken(
+                            text=tail_emitted,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            elapsed_seconds=elapsed_seconds,
+                            tokens_per_second=completion_tokens / elapsed_seconds,
+                            finish_reason="stop" if matched_stop else None,
+                            is_thinking=formatter.last_was_thinking,
+                        )
+            except InferenceNotReady:
+                raise
+            except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
+                raise InferenceError(f"MLX generation failed: {exc}") from exc
 
     def memory_status(self) -> ModelMemoryStatus:
         process_memory_bytes = _process_resident_memory_bytes()
+        mlx_active, mlx_cache, mlx_peak = _mlx_memory_bytes()
         with self._lock:
             loaded_models = [
                 LoadedModelMemory(
@@ -233,8 +288,15 @@ class ChatService:
 
         model_memory_bytes: int | None
         if not loaded_models:
-            model_memory_bytes = 0 if process_memory_bytes is not None else None
+            has_memory = mlx_active is not None or process_memory_bytes is not None
+            model_memory_bytes = 0 if has_memory else None
             note = "No model is loaded yet. Send a chat message to load one into unified memory."
+        elif mlx_active is not None:
+            model_memory_bytes = mlx_active
+            note = (
+                "Measured directly from MLX unified Metal memory "
+                "(active allocations; cache shown separately)."
+            )
         elif process_memory_bytes is None or self._baseline_memory_bytes is None:
             model_memory_bytes = None
             note = "Model is loaded, but process memory could not be read on this system."
@@ -252,12 +314,19 @@ class ChatService:
             process_memory_bytes=process_memory_bytes,
             baseline_memory_bytes=self._baseline_memory_bytes,
             model_memory_bytes=model_memory_bytes,
+            mlx_active_memory_bytes=mlx_active,
+            mlx_cache_memory_bytes=mlx_cache,
+            mlx_peak_memory_bytes=mlx_peak,
             note=note,
         )
 
-    def unload_models(self) -> None:
+    def unload_models(self) -> int:
         with self._lock:
+            count = len(self._loaded_models)
             self._loaded_models.clear()
+        if count > 0:
+            _release_mlx_memory()
+        return count
 
     def _resolve_adapter_path(self, explicit_adapter: str | None) -> str | None:
         if explicit_adapter is not None:
@@ -274,9 +343,17 @@ class ChatService:
         with self._lock:
             loaded = self._loaded_models.get(cache_key)
             if loaded is not None:
+                self._loaded_models.move_to_end(cache_key)
                 return loaded
 
             model_path = self._resolve_model_path(model_id)
+            evicted = False
+            while len(self._loaded_models) >= self._max_loaded_models:
+                self._loaded_models.popitem(last=False)
+                evicted = True
+            if evicted:
+                _release_mlx_memory()
+
             loader = self._model_loader or _default_model_loader
             try:
                 model, tokenizer = _invoke_loader(loader, model_path, adapter_path)
@@ -314,20 +391,37 @@ class ChatService:
         prompt: str | list[int],
         request: ChatCompletionRequest,
     ) -> Iterable[Any]:
+        if request.seed is not None:
+            _seed_mlx(request.seed)
         stream_generate = self._stream_generator or _load_mlx_lm()["stream_generate"]
+        kwargs: dict[str, Any] = {
+            "max_tokens": request.max_tokens,
+            "sampler": self._make_sampler(request),
+        }
+        if request.repetition_penalty is not None:
+            processors = _make_logits_processors(request.repetition_penalty)
+            if processors is not None:
+                kwargs["logits_processors"] = processors
         return stream_generate(
             loaded.model,
             loaded.tokenizer,
             prompt,
-            max_tokens=request.max_tokens,
-            sampler=self._make_sampler(request.temperature),
+            **kwargs,
         )
 
-    def _make_sampler(self, temperature: float) -> Callable[..., Any]:
+    def _make_sampler(self, request: ChatCompletionRequest) -> Callable[..., Any]:
         sampler_factory = self._sampler_factory
         if sampler_factory is None:
             sampler_factory = _load_mlx_lm()["make_sampler"]
-        return sampler_factory(temperature)
+        try:
+            params = inspect.signature(sampler_factory).parameters
+        except (TypeError, ValueError):
+            return sampler_factory(request.temperature)
+        if "top_p" in params:
+            if "temp" in params:
+                return sampler_factory(temp=request.temperature, top_p=request.top_p)
+            return sampler_factory(request.temperature, top_p=request.top_p)
+        return sampler_factory(request.temperature)
 
 
 def _invoke_loader(
@@ -360,6 +454,72 @@ def _load_mlx_lm() -> dict[str, Any]:
         "stream_generate": stream_generate,
         "make_sampler": make_sampler,
     }
+
+
+def _make_logits_processors(repetition_penalty: float) -> list[Any] | None:
+    try:
+        from mlx_lm.sample_utils import make_logits_processors
+    except ImportError:
+        return None
+    return make_logits_processors(repetition_penalty=repetition_penalty)
+
+
+def _seed_mlx(seed: int) -> None:
+    try:
+        import mlx.core as mx
+    except ImportError:
+        return
+    try:
+        mx.random.seed(seed)
+    except Exception:
+        pass
+
+
+def _release_mlx_memory() -> None:
+    gc.collect()
+    try:
+        import mlx.core as mx
+    except ImportError:
+        return
+    clear_cache = getattr(mx, "clear_cache", None)
+    if callable(clear_cache):
+        try:
+            clear_cache()
+            return
+        except Exception:
+            pass
+    metal = getattr(mx, "metal", None)
+    metal_clear = getattr(metal, "clear_cache", None) if metal is not None else None
+    if callable(metal_clear):
+        try:
+            metal_clear()
+        except Exception:
+            pass
+
+
+def _mlx_memory_bytes() -> tuple[int | None, int | None, int | None]:
+    try:
+        import mlx.core as mx
+    except ImportError:
+        return (None, None, None)
+
+    def _read(name: str) -> int | None:
+        fn = getattr(mx, name, None)
+        if not callable(fn):
+            metal = getattr(mx, "metal", None)
+            fn = getattr(metal, name, None) if metal is not None else None
+        if not callable(fn):
+            return None
+        try:
+            return int(fn())
+        except Exception:
+            return None
+
+    return (
+        _read("get_active_memory"),
+        _read("get_cache_memory"),
+        _read("get_peak_memory"),
+    )
 
 
 def _default_model_loader(
@@ -411,7 +571,9 @@ def _render_prompt(
     messages: list[ChatMessage],
     enable_thinking: bool = False,
 ) -> str | list[int]:
-    serializable_messages = [message.model_dump() for message in messages]
+    serializable_messages = [
+        {"role": message.role, "content": message.text_content()} for message in messages
+    ]
     apply_chat_template = getattr(tokenizer, "apply_chat_template", None)
     if callable(apply_chat_template):
         for kwargs in (
@@ -446,21 +608,79 @@ def _render_prompt(
 
 
 def _messages_for_request(request: ChatCompletionRequest) -> list[ChatMessage]:
-    """Strips prior raw thought channels from multi-turn assistant messages."""
+    """Strips prior raw thought channels and merges consecutive leading system messages."""
     cleaned: list[ChatMessage] = []
+    leading_systems: list[str] = []
+    collecting_system = True
+
     for message in request.messages:
+        text = message.text_content()
+        if collecting_system and message.role in {"system", "developer"}:
+            if text.strip():
+                leading_systems.append(text.strip())
+            continue
+
+        if collecting_system:
+            collecting_system = False
+            if leading_systems:
+                cleaned.append(ChatMessage(role="system", content="\n\n".join(leading_systems)))
+
         if message.role == "assistant":
-            stripped = _STRIP_THOUGHTS_RE.sub("", message.content).strip()
+            stripped = _STRIP_THOUGHTS_RE.sub("", text).strip()
             cleaned.append(ChatMessage(role="assistant", content=stripped))
         else:
-            cleaned.append(message)
+            cleaned.append(ChatMessage(role=message.role, content=text))
+
+    if collecting_system and leading_systems:
+        cleaned.append(ChatMessage(role="system", content="\n\n".join(leading_systems)))
+
     return cleaned
 
 
 def _fallback_prompt(messages: list[ChatMessage]) -> str:
-    parts = [f"{message.role}: {message.content}" for message in messages]
+    parts = [f"{message.role}: {message.text_content()}" for message in messages]
     parts.append("assistant:")
     return "\n".join(parts)
+
+
+class _StopSequenceFilter:
+    """Buffers minimal tail characters needed to detect stop sequences across token boundaries."""
+
+    def __init__(self, stop_sequences: list[str]) -> None:
+        self._stops = tuple(dict.fromkeys(seq for seq in stop_sequences if seq))
+        self._buffer = ""
+        self._max_len = max((len(seq) for seq in self._stops), default=0)
+
+    def feed(self, text: str) -> tuple[str, bool]:
+        if not self._stops:
+            return text, False
+        if not text:
+            return "", False
+
+        combined = self._buffer + text
+        earliest_pos: int | None = None
+        for seq in self._stops:
+            pos = combined.find(seq)
+            if pos != -1 and (earliest_pos is None or pos < earliest_pos):
+                earliest_pos = pos
+
+        if earliest_pos is not None:
+            self._buffer = ""
+            return combined[:earliest_pos], True
+
+        keep = self._max_len - 1
+        if keep <= 0 or len(combined) <= keep:
+            self._buffer = combined
+            return "", False
+
+        safe_end = len(combined) - keep
+        self._buffer = combined[safe_end:]
+        return combined[:safe_end], False
+
+    def flush(self) -> str:
+        tail = self._buffer
+        self._buffer = ""
+        return tail
 
 
 class _GemmaThoughtStreamParser:

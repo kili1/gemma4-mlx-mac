@@ -71,3 +71,28 @@ def test_cli_chat_passes_thinking_and_adapter(monkeypatch, tmp_path) -> None:
     assert len(captured) == 1
     assert captured[0].show_thinking is True
     assert captured[0].adapter_path == str(adapter_dir)
+
+
+def test_cli_respects_env_default_model_and_serve_flags(monkeypatch) -> None:
+    monkeypatch.setenv("GEMMA4_MLX_MODEL", "mlx-community/gemma-4-12B-it-qat-4bit")
+    monkeypatch.setenv("GEMMA4_MLX_PORT", "9090")
+    served: dict[str, object] = {}
+
+    def fake_uvicorn_run(app_str, host, port, reload):
+        served.update({"app": app_str, "host": host, "port": port, "reload": reload})
+
+    monkeypatch.setattr(cli.uvicorn, "run", fake_uvicorn_run)
+
+    result = runner.invoke(app, ["serve", "--preload"])
+
+    assert result.exit_code == 0
+    assert served["port"] == 9090
+    assert served["host"] == "127.0.0.1"
+    assert "mlx-community/gemma-4-12B-it-qat-4bit" in result.output
+
+
+def test_cli_doctor_reports_mlx_installed_and_ready() -> None:
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0
+    assert '"mlx_installed"' in result.output
+    assert '"mlx_ready"' in result.output

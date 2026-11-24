@@ -81,7 +81,7 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         notes="Dense flagship QAT 4-bit for 32+ GB Macs (~17.5 GB static Q4_0).",
     ),
     ModelProfile(
-        id="mlx-community/gemma-4-26B-A4B-it-bf16",
+        id="mlx-community/gemma-4-26b-a4b-it-bf16",
         label="Gemma 4 26B A4B Instruct bf16",
         size="26B-A4B",
         quantization="bf16",
@@ -92,7 +92,7 @@ MODEL_PROFILES: tuple[ModelProfile, ...] = (
         notes="Full-precision MoE workstation profile (~57.7 GB static).",
     ),
     ModelProfile(
-        id="mlx-community/gemma-4-31B-it-bf16",
+        id="mlx-community/gemma-4-31b-it-bf16",
         label="Gemma 4 31B Instruct bf16",
         size="31B",
         quantization="bf16",
