@@ -28,7 +28,7 @@ jobs:
           cd ..
           git diff --exit-code src/gemma4_mlx_mac/web
       - uses: astral-sh/setup-uv@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build distributions
