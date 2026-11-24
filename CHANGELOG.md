@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Unified multimodal Gemma 4 inference via `mlx-vlm` (image, audio, and video) across the OpenAI `/v1/chat/completions` API (`image_url`, `input_audio`, `audio_url`, `video_url`), CLI (`--image`, `--audio`, `--video`, `--stream`), and React Chat UI (file picker, drag-and-drop, clipboard screenshot paste, and inline thumbnails/audio players).
 - Gemma 4 QAT 4-bit model catalog (`E2B`, `E4B`, `12B` 256K, `26B-A4B` MoE, `31B`) plus canonical `bf16` workstation profiles.
 - Native Gemma 4 Thinking Mode (`enable_thinking=True/False`) with streaming `<|channel>thought...<channel|>` parsing, collapsible UI trace, and multi-turn history stripping.
 - Real `python -m mlx_lm lora` fine-tuning subprocess runner with live iteration, train/val loss, tokens/sec, peak memory parsing, and cancellation (`POST /api/tunes/{id}/cancel`, `GET /api/tunes`).

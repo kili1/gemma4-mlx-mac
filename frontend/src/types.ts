@@ -49,6 +49,7 @@ export type ModelMemoryStatus = {
     id: string;
     path: string;
     adapter_path?: string | null;
+    backend?: "text" | "vlm";
   }>;
   process_memory_bytes: number | null;
   baseline_memory_bytes: number | null;
@@ -61,6 +62,7 @@ export type ModelMemoryStatus = {
 
 export type InferenceStatus = {
   available: boolean;
+  multimodal_available?: boolean;
   installing: boolean;
   install_job_id: string | null;
   command: string[];
@@ -83,7 +85,9 @@ export type SystemInfo = {
   is_macos: boolean;
   is_apple_silicon: boolean;
   mlx_installed?: boolean;
+  mlx_vlm_installed?: boolean;
   mlx_ready: boolean;
+  multimodal_ready?: boolean;
   default_model?: string;
   recommendations: string[];
 };
@@ -151,10 +155,20 @@ export type GenerationStats = {
   elapsedSeconds: number;
 };
 
+export type MediaAttachment = {
+  id: string;
+  kind: "image" | "audio";
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  sizeBytes: number;
+};
+
 export type ChatTurn = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachments?: MediaAttachment[];
   stats?: GenerationStats | null;
   stopped?: boolean;
 };

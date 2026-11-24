@@ -5,15 +5,24 @@ updates:
     schedule:
       interval: "weekly"
     labels: ["dependencies", "python"]
+    groups:
+      python-dependencies:
+        patterns: ["*"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
     labels: ["dependencies", "frontend"]
+    groups:
+      frontend-dependencies:
+        patterns: ["*"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     labels: ["dependencies", "ci"]
+    groups:
+      github-actions:
+        patterns: ["*"]

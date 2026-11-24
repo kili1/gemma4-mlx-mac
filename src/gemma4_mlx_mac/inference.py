@@ -17,6 +17,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from .downloads import get_cached_model_path
+from .media import PreparedMultimodalBatch, message_has_media, prepare_multimodal_inputs
 from .models import DEFAULT_MODEL_ID
 
 _GEMMA_THOUGHT_OPEN = "<|channel>thought"
@@ -27,6 +28,8 @@ _STRIP_THOUGHTS_RE = re.compile(
     r"<\|channel>thought.*?<channel\|>|<think>.*?</think>",
     re.DOTALL | re.IGNORECASE,
 )
+
+InferenceBackend = Literal["text", "vlm"]
 
 
 class ChatMessage(BaseModel):
@@ -58,6 +61,9 @@ class ChatCompletionRequest(BaseModel):
     stream_options: dict[str, Any] | None = None
     show_thinking: bool = False
     adapter_path: str | None = None
+    images: list[str] = Field(default_factory=list)
+    audios: list[str] = Field(default_factory=list)
+    videos: list[str] = Field(default_factory=list)
 
     @field_validator("model")
     @classmethod
@@ -82,6 +88,11 @@ class ChatCompletionRequest(BaseModel):
             return [self.stop] if self.stop else []
         return [item for item in self.stop if item]
 
+    def has_multimodal_inputs(self) -> bool:
+        if self.images or self.audios or self.videos:
+            return True
+        return any(message_has_media(msg.content) for msg in self.messages)
+
 
 class InferenceNotReady(RuntimeError):
     pass
@@ -97,6 +108,8 @@ class LoadedChatModel:
     tokenizer: Any
     path: str
     adapter_path: str | None = None
+    backend: InferenceBackend = "text"
+    config: Any = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +127,7 @@ class LoadedModelMemory(BaseModel):
     id: str
     path: str
     adapter_path: str | None = None
+    backend: InferenceBackend = "text"
 
 
 class ModelMemoryStatus(BaseModel):
@@ -130,10 +144,12 @@ class ModelMemoryStatus(BaseModel):
 
 
 ModelLoader = Callable[..., tuple[Any, Any]]
+VlmLoader = Callable[..., tuple[Any, Any, Any]]
 StreamGenerator = Callable[..., Iterable[Any]]
 SamplerFactory = Callable[..., Callable[..., Any]]
 ModelPathResolver = Callable[[str], str | None]
 ActiveAdapterResolver = Callable[[], str | None]
+VlmPromptFormatter = Callable[..., str]
 
 
 class ChatService:
@@ -145,6 +161,9 @@ class ChatService:
         model_path_resolver: ModelPathResolver = get_cached_model_path,
         active_adapter_resolver: ActiveAdapterResolver | None = None,
         max_loaded_models: int = 1,
+        vlm_loader: VlmLoader | None = None,
+        vlm_stream_generator: StreamGenerator | None = None,
+        vlm_prompt_formatter: VlmPromptFormatter | None = None,
     ) -> None:
         self._model_loader = model_loader
         self._stream_generator = stream_generator
@@ -152,19 +171,37 @@ class ChatService:
         self._model_path_resolver = model_path_resolver
         self._active_adapter_resolver = active_adapter_resolver
         self._max_loaded_models = max(1, max_loaded_models)
-        self._loaded_models: OrderedDict[tuple[str, str | None], LoadedChatModel] = OrderedDict()
+        self._vlm_loader = vlm_loader
+        self._vlm_stream_generator = vlm_stream_generator
+        self._vlm_prompt_formatter = vlm_prompt_formatter
+        self._loaded_models: OrderedDict[
+            tuple[str, str | None, InferenceBackend], LoadedChatModel
+        ] = OrderedDict()
         self._baseline_memory_bytes = _process_resident_memory_bytes()
         self._lock = RLock()
         self._generate_lock = Lock()
 
     def prepare_request(self, request: ChatCompletionRequest) -> LoadedChatModel:
-        """Validates paths and loads the requested model+adapter before streaming begins."""
+        """Validates paths, media inputs, and loads the target text or VLM backend upfront."""
         adapter_path = self._resolve_adapter_path(request.adapter_path)
-        return self._load_model(request.model, adapter_path=adapter_path)
+        backend: InferenceBackend = "vlm" if request.has_multimodal_inputs() else "text"
+        if backend == "vlm":
+            # Validate media inputs early so invalid URLs / missing files fail with clear errors.
+            try:
+                with self._prepare_media_batch(request):
+                    pass
+            except (FileNotFoundError, ValueError) as exc:
+                raise InferenceNotReady(str(exc)) from exc
+        return self._load_model(request.model, adapter_path=adapter_path, backend=backend)
 
-    def preload(self, model_id: str, adapter_path: str | None = None) -> LoadedChatModel:
+    def preload(
+        self,
+        model_id: str,
+        adapter_path: str | None = None,
+        backend: InferenceBackend = "text",
+    ) -> LoadedChatModel:
         resolved_adapter = self._resolve_adapter_path(adapter_path)
-        return self._load_model(model_id, adapter_path=resolved_adapter)
+        return self._load_model(model_id, adapter_path=resolved_adapter, backend=backend)
 
     def create_completion(self, request: ChatCompletionRequest) -> dict:
         text_parts: list[str] = []
@@ -206,72 +243,103 @@ class ChatService:
         }
 
     def stream_tokens(self, request: ChatCompletionRequest) -> Iterable[GeneratedToken]:
-        loaded = self.prepare_request(request)
-        prompt = _render_prompt(
-            loaded.tokenizer,
-            _messages_for_request(request),
-            enable_thinking=request.show_thinking,
-        )
-        parser = _GemmaThoughtStreamParser()
-        formatter = _ThinkingOutputFormatter(show_thinking=request.show_thinking)
-        stop_filter = _StopSequenceFilter(request.stop_sequences())
-        started_at = time.monotonic()
-        completion_tokens = 0
-        prompt_tokens = 0
+        adapter_path = self._resolve_adapter_path(request.adapter_path)
+        is_multimodal = request.has_multimodal_inputs()
+        backend: InferenceBackend = "vlm" if is_multimodal else "text"
 
-        # Serialize Metal/MLX generation calls so concurrent HTTP requests never collide on GPU.
-        with self._generate_lock:
+        media_batch: PreparedMultimodalBatch | None = None
+        if is_multimodal:
             try:
-                stopped_early = False
-                for raw_chunk in self._stream_completion(loaded, prompt, request):
-                    raw_text = str(getattr(raw_chunk, "text", raw_chunk))
-                    segments = parser.feed(raw_text)
-                    emitted = formatter.format_segments(segments)
-                    emitted, matched_stop = stop_filter.feed(emitted)
-                    prompt_tokens = int(getattr(raw_chunk, "prompt_tokens", prompt_tokens) or 0)
-                    reported_tokens = int(getattr(raw_chunk, "generation_tokens", 0) or 0)
-                    if reported_tokens > completion_tokens:
-                        completion_tokens = reported_tokens
-                    elif emitted:
-                        completion_tokens += 1
-                    elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
-                    finish_reason = (
-                        "stop" if matched_stop else getattr(raw_chunk, "finish_reason", None)
-                    )
-                    if emitted or finish_reason is not None:
-                        yield GeneratedToken(
-                            text=emitted,
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            elapsed_seconds=elapsed_seconds,
-                            tokens_per_second=completion_tokens / elapsed_seconds,
-                            finish_reason=finish_reason,
-                            is_thinking=formatter.last_was_thinking,
-                        )
-                    if matched_stop:
-                        stopped_early = True
-                        break
+                media_batch = self._prepare_media_batch(request)
+            except (FileNotFoundError, ValueError) as exc:
+                raise InferenceNotReady(str(exc)) from exc
 
-                if not stopped_early:
-                    tail_raw = formatter.format_segments(parser.flush()) + formatter.flush()
-                    tail_emitted, matched_stop = stop_filter.feed(tail_raw)
-                    if not matched_stop:
-                        tail_emitted += stop_filter.flush()
-                    if tail_emitted or matched_stop:
+        try:
+            loaded = self._load_model(request.model, adapter_path=adapter_path, backend=backend)
+            if is_multimodal:
+                assert media_batch is not None
+                prompt: str | list[int] = self._render_vlm_prompt(
+                    loaded,
+                    media_batch,
+                    enable_thinking=request.show_thinking,
+                )
+            else:
+                prompt = _render_prompt(
+                    loaded.tokenizer,
+                    _messages_for_request(request),
+                    enable_thinking=request.show_thinking,
+                )
+
+            parser = _GemmaThoughtStreamParser()
+            formatter = _ThinkingOutputFormatter(show_thinking=request.show_thinking)
+            stop_filter = _StopSequenceFilter(request.stop_sequences())
+            started_at = time.monotonic()
+            completion_tokens = 0
+            prompt_tokens = 0
+
+            # Serialize Metal/MLX generation calls so concurrent requests never collide on GPU.
+            with self._generate_lock:
+                try:
+                    stopped_early = False
+                    raw_stream = (
+                        self._stream_vlm_completion(loaded, str(prompt), request, media_batch)
+                        if is_multimodal and media_batch is not None
+                        else self._stream_completion(loaded, prompt, request)
+                    )
+                    for raw_chunk in raw_stream:
+                        raw_text = str(getattr(raw_chunk, "text", raw_chunk))
+                        segments = parser.feed(raw_text)
+                        emitted = formatter.format_segments(segments)
+                        emitted, matched_stop = stop_filter.feed(emitted)
+                        prompt_tokens = int(getattr(raw_chunk, "prompt_tokens", prompt_tokens) or 0)
+                        reported_tokens = int(getattr(raw_chunk, "generation_tokens", 0) or 0)
+                        if reported_tokens > completion_tokens:
+                            completion_tokens = reported_tokens
+                        elif emitted:
+                            completion_tokens += 1
                         elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
-                        yield GeneratedToken(
-                            text=tail_emitted,
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            elapsed_seconds=elapsed_seconds,
-                            tokens_per_second=completion_tokens / elapsed_seconds,
-                            finish_reason="stop" if matched_stop else None,
-                            is_thinking=formatter.last_was_thinking,
+                        finish_reason = (
+                            "stop"
+                            if matched_stop
+                            else getattr(raw_chunk, "finish_reason", None)
                         )
-            except InferenceNotReady:
-                raise
-            except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
-                raise InferenceError(f"MLX generation failed: {exc}") from exc
+                        if emitted or finish_reason is not None:
+                            yield GeneratedToken(
+                                text=emitted,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                elapsed_seconds=elapsed_seconds,
+                                tokens_per_second=completion_tokens / elapsed_seconds,
+                                finish_reason=finish_reason,
+                                is_thinking=formatter.last_was_thinking,
+                            )
+                        if matched_stop:
+                            stopped_early = True
+                            break
+
+                    if not stopped_early:
+                        tail_raw = formatter.format_segments(parser.flush()) + formatter.flush()
+                        tail_emitted, matched_stop = stop_filter.feed(tail_raw)
+                        if not matched_stop:
+                            tail_emitted += stop_filter.flush()
+                        if tail_emitted or matched_stop:
+                            elapsed_seconds = max(time.monotonic() - started_at, 1e-9)
+                            yield GeneratedToken(
+                                text=tail_emitted,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                elapsed_seconds=elapsed_seconds,
+                                tokens_per_second=completion_tokens / elapsed_seconds,
+                                finish_reason="stop" if matched_stop else None,
+                                is_thinking=formatter.last_was_thinking,
+                            )
+                except InferenceNotReady:
+                    raise
+                except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
+                    raise InferenceError(f"MLX generation failed: {exc}") from exc
+        finally:
+            if media_batch is not None:
+                media_batch.close()
 
     def memory_status(self) -> ModelMemoryStatus:
         process_memory_bytes = _process_resident_memory_bytes()
@@ -282,8 +350,9 @@ class ChatService:
                     id=model_id,
                     path=loaded.path,
                     adapter_path=loaded.adapter_path,
+                    backend=loaded.backend,
                 )
-                for (model_id, _adapter), loaded in self._loaded_models.items()
+                for (model_id, _adapter, _backend), loaded in self._loaded_models.items()
             ]
 
         model_memory_bytes: int | None
@@ -328,6 +397,15 @@ class ChatService:
             _release_mlx_memory()
         return count
 
+    def _prepare_media_batch(self, request: ChatCompletionRequest) -> PreparedMultimodalBatch:
+        cleaned = _messages_for_multimodal_request(request)
+        return prepare_multimodal_inputs(
+            cleaned,
+            extra_images=request.images,
+            extra_audios=request.audios,
+            extra_videos=request.videos,
+        )
+
     def _resolve_adapter_path(self, explicit_adapter: str | None) -> str | None:
         if explicit_adapter is not None:
             candidate = Path(explicit_adapter).expanduser()
@@ -338,8 +416,13 @@ class ChatService:
             return self._active_adapter_resolver()
         return None
 
-    def _load_model(self, model_id: str, adapter_path: str | None = None) -> LoadedChatModel:
-        cache_key = (model_id, adapter_path)
+    def _load_model(
+        self,
+        model_id: str,
+        adapter_path: str | None = None,
+        backend: InferenceBackend = "text",
+    ) -> LoadedChatModel:
+        cache_key = (model_id, adapter_path, backend)
         with self._lock:
             loaded = self._loaded_models.get(cache_key)
             if loaded is not None:
@@ -354,9 +437,16 @@ class ChatService:
             if evicted:
                 _release_mlx_memory()
 
-            loader = self._model_loader or _default_model_loader
+            config: Any = None
             try:
-                model, tokenizer = _invoke_loader(loader, model_path, adapter_path)
+                if backend == "vlm":
+                    vlm_loader = self._vlm_loader or _default_vlm_loader
+                    model, tokenizer, config = _invoke_vlm_loader(
+                        vlm_loader, model_path, adapter_path
+                    )
+                else:
+                    loader = self._model_loader or _default_model_loader
+                    model, tokenizer = _invoke_loader(loader, model_path, adapter_path)
             except InferenceNotReady:
                 raise
             except Exception as exc:  # pragma: no cover - exact MLX exceptions vary by model.
@@ -367,6 +457,8 @@ class ChatService:
                 tokenizer=tokenizer,
                 path=model_path,
                 adapter_path=adapter_path,
+                backend=backend,
+                config=config,
             )
             self._loaded_models[cache_key] = loaded
             return loaded
@@ -409,6 +501,93 @@ class ChatService:
             **kwargs,
         )
 
+    def _render_vlm_prompt(
+        self,
+        loaded: LoadedChatModel,
+        batch: PreparedMultimodalBatch,
+        *,
+        enable_thinking: bool,
+    ) -> str:
+        if self._vlm_prompt_formatter is not None:
+            return self._vlm_prompt_formatter(
+                loaded.tokenizer,
+                loaded.config,
+                batch.messages,
+                num_images=len(batch.images),
+                num_audios=len(batch.audios),
+                enable_thinking=enable_thinking,
+            )
+
+        # Gemma 4's processor chat template handles structured content parts directly.
+        apply_chat_template = getattr(loaded.tokenizer, "apply_chat_template", None)
+        if callable(apply_chat_template):
+            for kwargs in (
+                {
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                    "enable_thinking": enable_thinking,
+                },
+                {
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                },
+            ):
+                try:
+                    rendered = apply_chat_template(batch.messages, **kwargs)
+                    if isinstance(rendered, str):
+                        return rendered
+                except TypeError:
+                    continue
+
+        mlx_vlm = _load_mlx_vlm()
+        vlm_apply = mlx_vlm["apply_chat_template"]
+        vlm_kwargs: dict[str, Any] = {
+            "add_generation_prompt": True,
+            "num_images": len(batch.images),
+            "num_audios": len(batch.audios),
+            "enable_thinking": enable_thinking,
+        }
+        if batch.videos:
+            vlm_kwargs["video"] = batch.videos
+        try:
+            rendered = vlm_apply(loaded.tokenizer, loaded.config, batch.messages, **vlm_kwargs)
+        except TypeError:
+            vlm_kwargs.pop("enable_thinking", None)
+            rendered = vlm_apply(loaded.tokenizer, loaded.config, batch.messages, **vlm_kwargs)
+        return str(rendered)
+
+    def _stream_vlm_completion(
+        self,
+        loaded: LoadedChatModel,
+        prompt: str,
+        request: ChatCompletionRequest,
+        batch: PreparedMultimodalBatch,
+    ) -> Iterable[Any]:
+        if request.seed is not None:
+            _seed_mlx(request.seed)
+        vlm_stream = self._vlm_stream_generator or _load_mlx_vlm()["stream_generate"]
+        kwargs: dict[str, Any] = {
+            "image": batch.images or None,
+            "audio": batch.audios or None,
+            "max_tokens": request.max_tokens,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "enable_thinking": request.show_thinking,
+            "verbose": False,
+        }
+        if batch.videos:
+            kwargs["video"] = batch.videos
+        if request.repetition_penalty is not None:
+            kwargs["repetition_penalty"] = request.repetition_penalty
+        if request.seed is not None:
+            kwargs["seed"] = request.seed
+        return vlm_stream(
+            loaded.model,
+            loaded.tokenizer,
+            prompt,
+            **kwargs,
+        )
+
     def _make_sampler(self, request: ChatCompletionRequest) -> Callable[..., Any]:
         sampler_factory = self._sampler_factory
         if sampler_factory is None:
@@ -440,6 +619,22 @@ def _invoke_loader(
     return loader(model_path)
 
 
+def _invoke_vlm_loader(
+    loader: VlmLoader,
+    model_path: str,
+    adapter_path: str | None,
+) -> tuple[Any, Any, Any]:
+    if adapter_path is not None:
+        return loader(model_path, adapter_path=adapter_path)
+    try:
+        params = inspect.signature(loader).parameters
+    except (TypeError, ValueError):
+        return loader(model_path)
+    if "adapter_path" in params:
+        return loader(model_path, adapter_path=None)
+    return loader(model_path)
+
+
 def _load_mlx_lm() -> dict[str, Any]:
     try:
         from mlx_lm import load, stream_generate
@@ -454,6 +649,35 @@ def _load_mlx_lm() -> dict[str, Any]:
         "stream_generate": stream_generate,
         "make_sampler": make_sampler,
     }
+
+
+def _load_mlx_vlm() -> dict[str, Any]:
+    try:
+        from mlx_vlm import load, stream_generate
+        from mlx_vlm.prompt_utils import apply_chat_template
+        from mlx_vlm.utils import load_config
+    except ImportError as exc:
+        raise InferenceNotReady(
+            "Multimodal (vision/audio) inference requires `mlx-vlm`. "
+            "Run `gemma4-mlx-mac install-mlx` or `pip install 'gemma4-mlx-mac[mlx]'`."
+        ) from exc
+    return {
+        "load": load,
+        "stream_generate": stream_generate,
+        "apply_chat_template": apply_chat_template,
+        "load_config": load_config,
+    }
+
+
+def _default_vlm_loader(
+    model_path: str,
+    adapter_path: str | None = None,
+) -> tuple[Any, Any, Any]:
+    mlx_vlm = _load_mlx_vlm()
+    load_kwargs = {"adapter_path": adapter_path} if adapter_path else {}
+    model, processor = mlx_vlm["load"](model_path, **load_kwargs)
+    config = mlx_vlm["load_config"](model_path)
+    return model, processor, config
 
 
 def _make_logits_processors(repetition_penalty: float) -> list[Any] | None:
@@ -633,6 +857,36 @@ def _messages_for_request(request: ChatCompletionRequest) -> list[ChatMessage]:
 
     if collecting_system and leading_systems:
         cleaned.append(ChatMessage(role="system", content="\n\n".join(leading_systems)))
+
+    return cleaned
+
+
+def _messages_for_multimodal_request(request: ChatCompletionRequest) -> list[dict[str, Any]]:
+    """Preserves structured multimodal parts while merging systems and stripping thoughts."""
+    cleaned: list[dict[str, Any]] = []
+    leading_systems: list[str] = []
+    collecting_system = True
+
+    for message in request.messages:
+        if collecting_system and message.role in {"system", "developer"}:
+            text = message.text_content().strip()
+            if text:
+                leading_systems.append(text)
+            continue
+
+        if collecting_system:
+            collecting_system = False
+            if leading_systems:
+                cleaned.append({"role": "system", "content": "\n\n".join(leading_systems)})
+
+        if message.role == "assistant":
+            stripped = _STRIP_THOUGHTS_RE.sub("", message.text_content()).strip()
+            cleaned.append({"role": "assistant", "content": stripped})
+        else:
+            cleaned.append({"role": message.role, "content": message.content})
+
+    if collecting_system and leading_systems:
+        cleaned.append({"role": "system", "content": "\n\n".join(leading_systems)})
 
     return cleaned
 

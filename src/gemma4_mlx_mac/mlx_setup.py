@@ -43,6 +43,7 @@ class MlxInstallJob(BaseModel):
 
 class MlxStatus(BaseModel):
     available: bool
+    multimodal_available: bool = False
     installing: bool
     install_job_id: str | None = None
     command: list[str]
@@ -60,6 +61,14 @@ def is_mlx_available() -> bool:
     return (
         importlib.util.find_spec("mlx") is not None
         and importlib.util.find_spec("mlx_lm") is not None
+    )
+
+
+def is_mlx_vlm_available() -> bool:
+    importlib.invalidate_caches()
+    return (
+        importlib.util.find_spec("mlx") is not None
+        and importlib.util.find_spec("mlx_vlm") is not None
     )
 
 
@@ -96,16 +105,23 @@ class MlxInstallerJobStore:
         current_job = self.current_job()
         command = self._command_builder()
         available = is_mlx_available()
+        multimodal_available = is_mlx_vlm_available()
         installing = current_job is not None and current_job.status in {"queued", "running"}
-        if available:
-            message = "MLX inference dependencies are installed."
+        if available and multimodal_available:
+            message = "MLX text and multimodal (vision/audio) dependencies are installed."
+        elif available:
+            message = (
+                "MLX text dependencies are installed. Re-run `gemma4-mlx-mac install-mlx` "
+                "to enable vision and audio via mlx-vlm."
+            )
         elif installing:
             message = "Installing MLX inference dependencies..."
         else:
-            message = "Install the MLX extra to enable local chat inference."
+            message = "Install the MLX extra to enable local text, vision, and audio inference."
 
         return MlxStatus(
             available=available,
+            multimodal_available=multimodal_available,
             installing=installing,
             install_job_id=current_job.id if current_job else None,
             command=command.argv,
@@ -121,13 +137,13 @@ class MlxInstallerJobStore:
             return running_job
 
         command = self._command_builder()
-        if is_mlx_available():
+        if is_mlx_available() and is_mlx_vlm_available():
             job = MlxInstallJob(
                 id=uuid4().hex,
                 status="succeeded",
                 command=command.argv,
                 cwd=command.cwd,
-                message="MLX inference dependencies are already installed.",
+                message="MLX text and multimodal dependencies are already installed.",
                 created_at=datetime.now(UTC),
                 completed_at=datetime.now(UTC),
             )
