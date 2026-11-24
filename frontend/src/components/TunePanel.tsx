@@ -1,5 +1,5 @@
 import React from "react";
-import { FileText, SlidersHorizontal, Square, Terminal } from "lucide-react";
+import { ArrowRight, CheckCircle2, FileText, SlidersHorizontal, Square, Terminal } from "lucide-react";
 
 import { fetchJson } from "../api";
 import {
@@ -10,10 +10,24 @@ import {
   parsePositiveInt,
   tuneStatusTone,
 } from "../format";
-import type { ModelProfile, SyntheticDatasetResult, SyntheticFormat, TuneJob } from "../types";
-import { PageHeader, StatusBadge } from "./Common";
+import { parseLossHistory } from "../storage";
+import type {
+  LossPoint,
+  ModelProfile,
+  SyntheticDatasetResult,
+  SyntheticFormat,
+  TuneJob,
+  View,
+} from "../types";
+import { NoticeBanner, PageHeader, StatusBadge } from "./Common";
 
-export function TunePanel() {
+export function TunePanel({
+  onNavigate,
+  onAdapterActivated,
+}: {
+  onNavigate: (view: View) => void;
+  onAdapterActivated: () => void;
+}) {
   const [models, setModels] = React.useState<ModelProfile[]>([]);
   const [model, setModel] = React.useState("");
   const [dataPath, setDataPath] = React.useState("examples/data");
@@ -31,11 +45,13 @@ export function TunePanel() {
   const [syntheticOutput, setSyntheticOutput] = React.useState("examples/synthetic");
 
   const [message, setMessage] = React.useState("");
+  const [noticeTone, setNoticeTone] = React.useState<"warn" | "good">("warn");
   const [jobs, setJobs] = React.useState<TuneJob[]>([]);
   const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null);
   const [syntheticResult, setSyntheticResult] = React.useState<SyntheticDatasetResult | null>(null);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [isCancelling, setIsCancelling] = React.useState(false);
+  const [isActivating, setIsActivating] = React.useState(false);
   const [isGeneratingData, setIsGeneratingData] = React.useState(false);
 
   const mountedRef = React.useRef(true);
@@ -73,6 +89,7 @@ export function TunePanel() {
       })
       .catch((error: unknown) => {
         if (mountedRef.current) {
+          setNoticeTone("warn");
           setMessage(error instanceof Error ? error.message : "Could not load model profiles.");
         }
       });
@@ -99,6 +116,31 @@ export function TunePanel() {
         ? prev.map((item) => (item.id === updated.id ? updated : item))
         : [...prev, updated];
     });
+  }
+
+  function applyPreset(preset: "smoke" | "balanced" | "lowram") {
+    if (preset === "smoke") {
+      setItersInput("20");
+      setBatchSizeInput("1");
+      setLearningRateInput("2e-5");
+      setFineTuneType("lora");
+      setNumLayersInput("8");
+      setGradCheckpoint(false);
+    } else if (preset === "balanced") {
+      setItersInput("100");
+      setBatchSizeInput("1");
+      setLearningRateInput("1e-5");
+      setFineTuneType("lora");
+      setNumLayersInput("16");
+      setGradCheckpoint(false);
+    } else {
+      setItersInput("80");
+      setBatchSizeInput("1");
+      setLearningRateInput("1e-5");
+      setFineTuneType("lora");
+      setNumLayersInput("8");
+      setGradCheckpoint(true);
+    }
   }
 
   async function startTune() {
@@ -141,6 +183,7 @@ export function TunePanel() {
       }
     } catch (error: unknown) {
       if (mountedRef.current) {
+        setNoticeTone("warn");
         setMessage(error instanceof Error ? error.message : "Fine-tune job failed.");
       }
     } finally {
@@ -164,11 +207,34 @@ export function TunePanel() {
       }
     } catch (error: unknown) {
       if (mountedRef.current) {
+        setNoticeTone("warn");
         setMessage(error instanceof Error ? error.message : "Could not cancel fine-tune job.");
       }
     } finally {
       if (mountedRef.current) {
         setIsCancelling(false);
+      }
+    }
+  }
+
+  async function activateTrainedAdapter(name: string) {
+    setIsActivating(true);
+    setMessage("");
+    try {
+      await fetchJson(
+        `/api/adapters/${encodeURIComponent(name)}/activate`,
+        { method: "POST" },
+        "Could not activate adapter.",
+      );
+      onAdapterActivated();
+    } catch (error: unknown) {
+      if (mountedRef.current) {
+        setNoticeTone("warn");
+        setMessage(error instanceof Error ? error.message : "Could not activate adapter.");
+      }
+    } finally {
+      if (mountedRef.current) {
+        setIsActivating(false);
       }
     }
   }
@@ -189,6 +255,7 @@ export function TunePanel() {
       }
     } catch (error: unknown) {
       if (mountedRef.current) {
+        setNoticeTone("warn");
         setMessage(error instanceof Error ? error.message : "Could not read fine-tune progress.");
       }
     }
@@ -220,9 +287,11 @@ export function TunePanel() {
       }
       setSyntheticResult(data);
       setDataPath(data.data_path);
-      setMessage(`Synthetic dataset created at ${data.data_path} (train + valid JSONL).`);
+      setNoticeTone("good");
+      setMessage(`Synthetic dataset created at ${data.data_path} (train.jsonl + valid.jsonl).`);
     } catch (error: unknown) {
       if (mountedRef.current) {
+        setNoticeTone("warn");
         setMessage(
           error instanceof Error ? error.message : "Synthetic dataset generation failed.",
         );
@@ -236,16 +305,26 @@ export function TunePanel() {
 
   return (
     <>
-      <PageHeader title="Fine-tune" eyebrow="MLX-LM LoRA / QLoRA">
+      <PageHeader title="Fine-tune" eyebrow="MLX-LM LoRA / QLoRA studio">
         <StatusBadge tone={tuneStatusTone(job?.status)}>{job?.status ?? "idle"}</StatusBadge>
+        <button
+          type="button"
+          className="secondary compact-button"
+          onClick={() => onNavigate("adapters")}
+        >
+          <span>Adapters</span>
+          <ArrowRight size={14} />
+        </button>
       </PageHeader>
-      {message && <p className="notice">{message}</p>}
+      {message && (
+        <NoticeBanner message={message} tone={noticeTone} onDismiss={() => setMessage("")} />
+      )}
       <div className="two-column">
         <div className="panel-stack">
           <section className="panel form-panel">
             <div className="block-heading">
-              <FileText size={18} />
-              <strong>Synthetic dataset</strong>
+              <FileText size={16} />
+              <strong>1. Synthetic starter dataset</strong>
             </div>
             <label className="field">
               <span>Topic</span>
@@ -291,17 +370,41 @@ export function TunePanel() {
               data-busy={isGeneratingData || undefined}
               onClick={generateSyntheticData}
             >
-              {isGeneratingData ? "Generating" : "Generate Dataset"}
+              {isGeneratingData ? "Generating…" : "Generate Dataset"}
             </button>
           </section>
 
           <section className="panel form-panel">
             <div className="block-heading">
-              <SlidersHorizontal size={18} />
-              <strong>Fine-tune job</strong>
+              <SlidersHorizontal size={16} />
+              <strong>2. Configure LoRA run</strong>
             </div>
+            <div className="preset-row" role="group" aria-label="Training presets">
+              <button
+                type="button"
+                className="pill-toggle"
+                onClick={() => applyPreset("smoke")}
+              >
+                Quick test (20 iters)
+              </button>
+              <button
+                type="button"
+                className="pill-toggle"
+                onClick={() => applyPreset("balanced")}
+              >
+                Balanced (100 iters)
+              </button>
+              <button
+                type="button"
+                className="pill-toggle"
+                onClick={() => applyPreset("lowram")}
+              >
+                Low-RAM QLoRA
+              </button>
+            </div>
+
             <label className="field">
-              <span>Model</span>
+              <span>Base model</span>
               <select value={model} onChange={(event) => setModel(event.target.value)}>
                 {models.map((profile) => (
                   <option key={profile.id} value={profile.id}>
@@ -311,11 +414,11 @@ export function TunePanel() {
               </select>
             </label>
             <label className="field">
-              <span>Dataset</span>
+              <span>Dataset directory</span>
               <input value={dataPath} onChange={(event) => setDataPath(event.target.value)} />
             </label>
             <label className="field">
-              <span>Adapter</span>
+              <span>Adapter name</span>
               <input value={adapterName} onChange={(event) => setAdapterName(event.target.value)} />
             </label>
             <div className="form-grid">
@@ -329,7 +432,7 @@ export function TunePanel() {
                 />
               </label>
               <label className="field">
-                <span>Batch</span>
+                <span>Batch size</span>
                 <input
                   min={1}
                   type="number"
@@ -373,7 +476,7 @@ export function TunePanel() {
             <label className="switch-row">
               <span className="switch-copy">
                 <strong>Gradient checkpointing</strong>
-                <small>Reduces unified memory usage at a modest speed cost.</small>
+                <small>Reduces unified memory pressure on 8–16 GB Macs.</small>
               </span>
               <input
                 aria-label="Enable gradient checkpointing"
@@ -390,7 +493,7 @@ export function TunePanel() {
               data-busy={isSubmitting || undefined}
               onClick={startTune}
             >
-              {isSubmitting ? "Starting" : "Start Fine-tune"}
+              {isSubmitting ? "Starting…" : "Start Fine-tune"}
             </button>
           </section>
         </div>
@@ -399,13 +502,13 @@ export function TunePanel() {
           {syntheticResult && (
             <div className="result-block">
               <div className="block-heading">
-                <FileText size={18} />
-                <strong>Synthetic data</strong>
+                <FileText size={16} />
+                <strong>Synthetic data ready</strong>
               </div>
               <dl className="details-list">
                 <div>
                   <dt>Examples</dt>
-                  <dd>{syntheticResult.examples} train</dd>
+                  <dd>{syntheticResult.examples} train (+ valid split)</dd>
                 </div>
                 <div>
                   <dt>Format</dt>
@@ -413,7 +516,7 @@ export function TunePanel() {
                 </div>
                 <div>
                   <dt>Path</dt>
-                  <dd>{syntheticResult.train_path}</dd>
+                  <dd>{syntheticResult.data_path}</dd>
                 </div>
               </dl>
             </div>
@@ -439,7 +542,7 @@ export function TunePanel() {
             <>
               <div className="block-heading memory-heading">
                 <span className="heading-inline">
-                  <Terminal size={18} />
+                  <Terminal size={16} />
                   <strong>{job.request.adapter_name}</strong>
                 </span>
                 {isTuneActive(job.status) && (
@@ -450,20 +553,34 @@ export function TunePanel() {
                     data-busy={isCancelling || undefined}
                     onClick={() => cancelTune(job.id)}
                   >
-                    <Square size={14} />
+                    <Square size={13} />
                     <span>{isCancelling ? "Cancelling" : "Cancel"}</span>
                   </button>
                 )}
               </div>
+
+              {job.status === "succeeded" && (
+                <div className="success-banner">
+                  <span>Adapter weights saved. Ready to test in Chat.</span>
+                  <button
+                    type="button"
+                    className="primary compact-button"
+                    disabled={isActivating}
+                    data-busy={isActivating || undefined}
+                    onClick={() => activateTrainedAdapter(job.request.adapter_name)}
+                  >
+                    <CheckCircle2 size={14} />
+                    <span>{isActivating ? "Activating…" : "Activate & Chat"}</span>
+                  </button>
+                </div>
+              )}
+
               <TuneProgress job={job} />
+
               <dl className="details-list">
                 <div>
                   <dt>Examples</dt>
                   <dd>{countDatasetExamples(job.dataset)}</dd>
-                </div>
-                <div>
-                  <dt>Status</dt>
-                  <dd>{job.status}</dd>
                 </div>
                 <div>
                   <dt>Method</dt>
@@ -479,8 +596,9 @@ export function TunePanel() {
             </>
           ) : (
             <div className="empty-state">
-              <SlidersHorizontal size={28} />
-              <strong>No job queued</strong>
+              <SlidersHorizontal size={26} />
+              <strong>No training jobs yet</strong>
+              <small>Pick a preset and click Start Fine-tune to watch live loss and memory.</small>
             </div>
           )}
         </section>
@@ -489,9 +607,75 @@ export function TunePanel() {
   );
 }
 
+function LossSparkline({ points }: { points: LossPoint[] }) {
+  const trainPoints = points.filter((p) => typeof p.trainLoss === "number");
+  if (trainPoints.length < 2) {
+    return null;
+  }
+
+  const allLosses = points.flatMap((p) =>
+    [p.trainLoss, p.valLoss].filter((v): v is number => typeof v === "number"),
+  );
+  const minLoss = Math.min(...allLosses);
+  const maxLoss = Math.max(...allLosses);
+  const lossSpan = Math.max(maxLoss - minLoss, 0.01);
+  const minIter = points[0].iter;
+  const maxIter = Math.max(points[points.length - 1].iter, minIter + 1);
+
+  const width = 320;
+  const height = 88;
+  const pad = 8;
+
+  const xFor = (iter: number) => pad + ((iter - minIter) / (maxIter - minIter)) * (width - pad * 2);
+  const yFor = (loss: number) =>
+    height - pad - ((loss - minLoss) / lossSpan) * (height - pad * 2);
+
+  const polyline = trainPoints
+    .map((pt) => `${xFor(pt.iter).toFixed(1)},${yFor(pt.trainLoss!).toFixed(1)}`)
+    .join(" ");
+
+  const valPoints = points.filter((p) => typeof p.valLoss === "number");
+
+  return (
+    <div className="loss-chart-card">
+      <div className="loss-chart-header">
+        <strong>Training loss curve</strong>
+        <span className="tabular">
+          min {minLoss.toFixed(3)} · max {maxLoss.toFixed(3)}
+        </span>
+      </div>
+      <svg
+        className="loss-chart-svg"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="Training and validation loss chart"
+      >
+        <polyline
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          points={polyline}
+        />
+        {valPoints.map((pt) => (
+          <circle
+            key={pt.iter}
+            cx={xFor(pt.iter)}
+            cy={yFor(pt.valLoss!)}
+            r="3.5"
+            fill="hsl(152 56% 42%)"
+          />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
 function TuneProgress({ job }: { job: TuneJob }) {
   const percent = clampProgress(job.progress_percent);
-  const recentLogs = job.logs.slice(-12);
+  const recentLogs = job.logs.slice(-14);
+  const lossHistory = parseLossHistory(job.logs);
 
   return (
     <div className="tune-progress" aria-label={`Fine-tune progress for ${job.id}`}>
@@ -503,10 +687,10 @@ function TuneProgress({ job }: { job: TuneJob }) {
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>
       <p>{job.error ?? job.message}</p>
-      {(job.train_loss !== undefined && job.train_loss !== null) ||
-      (job.val_loss !== undefined && job.val_loss !== null) ||
-      (job.tokens_per_second !== undefined && job.tokens_per_second !== null) ||
-      (job.peak_memory_gb !== undefined && job.peak_memory_gb !== null) ? (
+      {(job.train_loss != null ||
+        job.val_loss != null ||
+        job.tokens_per_second != null ||
+        job.peak_memory_gb != null) && (
         <div className="tune-metrics">
           {job.train_loss != null && <span>Train loss: {job.train_loss.toFixed(3)}</span>}
           {job.val_loss != null && <span>Val loss: {job.val_loss.toFixed(3)}</span>}
@@ -515,10 +699,11 @@ function TuneProgress({ job }: { job: TuneJob }) {
           )}
           {job.peak_memory_gb != null && <span>Peak: {job.peak_memory_gb.toFixed(2)} GB</span>}
         </div>
-      ) : null}
+      )}
+      <LossSparkline points={lossHistory} />
       {recentLogs.length > 0 && (
         <div className="job-log">
-          <strong>Activity</strong>
+          <strong>Training log</strong>
           <ol>
             {recentLogs.map((entry, index) => (
               <li key={`${index}-${entry.slice(0, 24)}`}>{entry}</li>

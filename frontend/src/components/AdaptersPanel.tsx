@@ -1,15 +1,22 @@
 import React from "react";
-import { Activity, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
+import { Activity, ArrowRight, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
 
 import { fetchJson } from "../api";
-import type { AdapterInfo } from "../types";
-import { PageHeader, StatusBadge } from "./Common";
+import type { AdapterInfo, View } from "../types";
+import { NoticeBanner, PageHeader, StatusBadge } from "./Common";
 
-export function AdaptersPanel() {
+export function AdaptersPanel({
+  onNavigate,
+  onOpenChat,
+}: {
+  onNavigate: (view: View) => void;
+  onOpenChat: () => void;
+}) {
   const [adapters, setAdapters] = React.useState<AdapterInfo[]>([]);
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
   const [message, setMessage] = React.useState("");
+  const [noticeTone, setNoticeTone] = React.useState<"warn" | "good">("good");
 
   React.useEffect(() => {
     refreshAdapters();
@@ -25,6 +32,7 @@ export function AdaptersPanel() {
       );
       setAdapters(data.adapters);
     } catch (error: unknown) {
+      setNoticeTone("warn");
       setMessage(error instanceof Error ? error.message : "Could not load adapters.");
     } finally {
       setIsRefreshing(false);
@@ -40,9 +48,11 @@ export function AdaptersPanel() {
         { method: "POST" },
         "Could not activate adapter.",
       );
+      setNoticeTone("good");
       setMessage(`Activated adapter "${adapterId}". New chat turns will load it automatically.`);
       await refreshAdapters();
     } catch (error: unknown) {
+      setNoticeTone("warn");
       setMessage(error instanceof Error ? error.message : "Could not activate adapter.");
     } finally {
       setBusyId(null);
@@ -58,9 +68,11 @@ export function AdaptersPanel() {
         { method: "POST" },
         "Could not deactivate adapter.",
       );
+      setNoticeTone("good");
       setMessage("Deactivated adapter. Chat will use base model weights.");
       await refreshAdapters();
     } catch (error: unknown) {
+      setNoticeTone("warn");
       setMessage(error instanceof Error ? error.message : "Could not deactivate adapter.");
     } finally {
       setBusyId(null);
@@ -71,20 +83,18 @@ export function AdaptersPanel() {
 
   return (
     <>
-      <PageHeader title="Adapters" eyebrow="Local LoRA outputs">
+      <PageHeader title="Adapters" eyebrow="Local LoRA / QLoRA outputs">
         <StatusBadge tone={activeAdapter ? "good" : "neutral"}>
           {activeAdapter ? `Active: ${activeAdapter.id}` : `${adapters.length} found`}
         </StatusBadge>
         {activeAdapter && (
           <button
             type="button"
-            className="secondary compact-button"
-            disabled={busyId !== null}
-            data-busy={busyId === "__deactivate__" || undefined}
-            onClick={deactivateAdapter}
+            className="primary compact-button"
+            onClick={onOpenChat}
           >
-            <XCircle size={15} />
-            <span>Deactivate</span>
+            <span>Test in Chat</span>
+            <ArrowRight size={14} />
           </button>
         )}
         <button
@@ -94,17 +104,27 @@ export function AdaptersPanel() {
           data-busy={isRefreshing || undefined}
           onClick={refreshAdapters}
         >
-          <RefreshCw size={15} />
+          <RefreshCw size={14} />
           <span>Refresh</span>
         </button>
       </PageHeader>
-      {message && <p className="notice">{message}</p>}
+      {message && (
+        <NoticeBanner message={message} tone={noticeTone} onDismiss={() => setMessage("")} />
+      )}
       <div className="model-list">
         {adapters.length === 0 ? (
           <div className="panel empty-state">
-            <Activity size={28} />
-            <strong>No adapters</strong>
-            <small>Run a LoRA fine-tuning job to create an adapter under ./adapters.</small>
+            <Activity size={26} />
+            <strong>No local adapters yet</strong>
+            <small>Train a LoRA or QLoRA adapter to save weights under ./adapters.</small>
+            <button
+              type="button"
+              className="primary compact-button"
+              onClick={() => onNavigate("tune")}
+            >
+              <span>Start a Fine-tune</span>
+              <ArrowRight size={14} />
+            </button>
           </div>
         ) : (
           adapters.map((adapter) => (
@@ -118,31 +138,43 @@ export function AdaptersPanel() {
                       <span>{adapter.has_weights ? "Weights ready" : "No weights yet"}</span>
                     </div>
                   </div>
-                  <p>{adapter.path}</p>
+                  <p className="model-id-code">{adapter.path}</p>
                 </div>
-                {adapter.active ? (
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={busyId !== null}
-                    data-busy={busyId === "__deactivate__" || undefined}
-                    onClick={deactivateAdapter}
-                  >
-                    <XCircle size={16} />
-                    <span>Deactivate</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="primary icon-button"
-                    disabled={busyId !== null}
-                    data-busy={busyId === adapter.id || undefined}
-                    onClick={() => activateAdapter(adapter.id)}
-                  >
-                    <CheckCircle2 size={16} />
-                    <span>{busyId === adapter.id ? "Activating" : "Activate"}</span>
-                  </button>
-                )}
+                <div className="model-row-actions">
+                  {adapter.active ? (
+                    <>
+                      <button
+                        type="button"
+                        className="primary compact-button"
+                        onClick={onOpenChat}
+                      >
+                        <span>Chat</span>
+                        <ArrowRight size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary compact-button"
+                        disabled={busyId !== null}
+                        data-busy={busyId === "__deactivate__" || undefined}
+                        onClick={deactivateAdapter}
+                      >
+                        <XCircle size={15} />
+                        <span>Deactivate</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="primary compact-button"
+                      disabled={busyId !== null}
+                      data-busy={busyId === adapter.id || undefined}
+                      onClick={() => activateAdapter(adapter.id)}
+                    >
+                      <CheckCircle2 size={15} />
+                      <span>{busyId === adapter.id ? "Activating" : "Activate"}</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           ))
